@@ -4,7 +4,7 @@ from PIL import Image, ImageOps
 import numpy as np
 import torch
 
-class LoadImagePreviewNode:
+class LoadImageFunCodeNode:
     @classmethod
     def INPUT_TYPES(s):
         # 输入目录内的图片列表

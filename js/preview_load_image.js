@@ -2,9 +2,9 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
 app.registerExtension({
-    name: "FunCode.LoadImagePreviewNode",
+    name: "FunCode.LoadImageFunCodeNode",
     async nodeCreated(node) {
-        if (node.comfyClass !== "LoadImagePreviewNode") return;
+        if (node.comfyClass !== "LoadImageFunCodeNode") return;
 
         // 获取图片选择器小部件
         const imageWidget = node.widgets.find(w => w.name === "image");

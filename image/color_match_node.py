@@ -5,7 +5,7 @@ import numpy as np
 import torch
 
 
-class ColorMatchNode:
+class ColorMatchFunCodeNode:
     @classmethod
     def INPUT_TYPES(cls):
         return {
