@@ -4,6 +4,51 @@ from PIL import Image, ImageOps
 import numpy as np
 import torch
 
+try:
+    import aiohttp.web
+    from server import PromptServer
+
+    @PromptServer.instance.routes.post("/funcode/input_files_mtime")
+    async def funcode_input_files_mtime(request):
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+
+        filenames = payload.get("filenames")
+        if not isinstance(filenames, list):
+            filenames = []
+
+        input_dir = folder_paths.get_input_directory()
+        input_dir_norm = os.path.normpath(input_dir)
+
+        mtimes = {}
+        for name in filenames:
+            if not isinstance(name, str) or not name:
+                continue
+            if os.path.isabs(name) or ":" in name:
+                continue
+            normalized = os.path.normpath(name)
+            parts = normalized.replace("\\", "/").split("/")
+            if any(p == ".." for p in parts):
+                continue
+            full_path = os.path.normpath(os.path.join(input_dir_norm, normalized))
+            try:
+                if os.path.commonpath([input_dir_norm, full_path]) != input_dir_norm:
+                    continue
+            except Exception:
+                continue
+            if not os.path.isfile(full_path):
+                continue
+            try:
+                mtimes[name] = os.path.getmtime(full_path)
+            except Exception:
+                continue
+
+        return aiohttp.web.json_response({"mtimes": mtimes})
+except Exception:
+    pass
+
 class LoadImageFunCodeNode:
     @classmethod
     def INPUT_TYPES(s):
