@@ -79,6 +79,40 @@ def collect_profiles():
     return labels, mapping
 
 
+def _prompts_dir():
+    return os.path.join(os.path.dirname(__file__), "system_prompts")
+
+
+def collect_system_prompts():
+    directory = _prompts_dir()
+    try:
+        os.makedirs(directory, exist_ok=True)
+    except Exception:
+        pass
+    labels = []
+    mapping = {}
+    try:
+        for name in sorted(os.listdir(directory)):
+            path = os.path.join(directory, name)
+            if not os.path.isfile(path):
+                continue
+            lower = name.lower()
+            if not (lower.endswith(".md") or lower.endswith(".txt")):
+                continue
+            label = os.path.splitext(name)[0]
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                if content:
+                    labels.append(label)
+                    mapping[label] = content
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return labels, mapping
+
+
 def image_to_data_url(image):
     try:
         import torch
@@ -186,7 +220,7 @@ def call_llm(api_base, api_key, model, system_prompt, user_prompt, image, temper
     return raw
 
 
-class AnyLLMNode:
+class AnyLLMFunCodeNode:
     @classmethod
     def INPUT_TYPES(cls):
         # Look for .env in the parent directory (package root)
@@ -197,6 +231,8 @@ class AnyLLMNode:
         default_base = env_default("LLM_API_BASE", "")
         default_model = env_default("LLM_MODEL", "")
         profile_choices = [_default_profile_label, _custom_profile_label] + labels
+        prompt_labels, _prompt_mapping = collect_system_prompts()
+        system_prompt_choices = ["custom"] + prompt_labels
         return {
             "required": {
                 "profile": (profile_choices,),
@@ -204,6 +240,7 @@ class AnyLLMNode:
                 "api_key": ("STRING", {"default": ""}),
                 "model": ("STRING", {"default": ""}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "system_prompt_select": (system_prompt_choices,),
                 "system_prompt": ("STRING", {"multiline": True, "default": ""}),
                 "user_prompt": ("STRING", {"multiline": True, "default": ""}),
                 "temperature": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 2.0, "step": 0.01}),
@@ -219,7 +256,7 @@ class AnyLLMNode:
     FUNCTION = "run"
     CATEGORY = "FunCode/LLM"
 
-    def run(self, profile, api_base, api_key, model, seed, system_prompt, user_prompt, temperature, top_p, max_tokens, timeout, image=None):
+    def run(self, profile, api_base, api_key, model, seed, system_prompt_select, system_prompt, user_prompt, temperature, top_p, max_tokens, timeout, image=None):
         # Look for .env in the parent directory (package root)
         env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
         load_env_file(env_path)
@@ -254,6 +291,9 @@ class AnyLLMNode:
             return ("ERROR: api_base and model are required (configure in .env or enter manually)",)
 
         try:
+            prompt_labels, prompt_mapping = collect_system_prompts()
+            if system_prompt_select != "custom" and system_prompt_select in prompt_mapping:
+                system_prompt = prompt_mapping[system_prompt_select]
             result = call_llm(final_base, final_key, final_model, system_prompt, user_prompt, image, temperature, top_p, max_tokens, timeout, seed)
             return (result,)
         except Exception as e:
