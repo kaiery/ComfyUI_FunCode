@@ -8,6 +8,8 @@
   - **Load Image FunCode**：从 input 目录选择并加载图片。
   - **Color Match FunCode**：对齐参考图的色彩风格（颜色匹配/迁移）。
   - **Empty Latent FunCode**：按常用分辨率预设生成空 latent。
+  - **Canvas Data FunCode**：聚合背景与叠加图层数据。
+  - **Canvas Editor FunCode**：可视化编辑画布并导出合成图像。
 - **FunCode/LLM**
   - **Any LLM FunCode**：调用任意大模型，支持系统提示词/用户提示词，可选输入图像（取决于服务端是否支持）。
 
@@ -48,6 +50,19 @@
 
 - 用途：快速创建指定分辨率的空 latent（内置预设，也支持自定义宽高）。
 
+### Canvas Data FunCode
+
+- 用途：将背景图与多个叠加图层打包为画布数据。
+- 输出：fc_data_json。
+
+### Canvas Editor FunCode
+
+- 用途：在画布上可视化编辑图层、文本与背景。
+- 输入：fc_data_json（来自 Canvas Data FunCode）。
+- 输出：image（合成后的图像）。
+- 保存：保存到 `ComfyUI/input/FunCodeCanvas` 目录。
+- 导入：从 `ComfyUI/input/FunCodeCanvas` 目录导入。
+
 ### Any LLM FunCode
 
 - 用途：调用你配置的 LLM 服务，输出文本。
@@ -72,4 +87,3 @@
 - 支持：`.md` / `.txt`
 - 节点下拉会自动加载目录内所有文件
 - 选择 `custom`：使用面板输入框内容
-
