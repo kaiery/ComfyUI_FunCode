@@ -126,8 +126,8 @@ class CanvasDataFunCodeNode:
         }
 
     CATEGORY = "FunCode/Canvas"
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("fc_data_json",)
+    RETURN_TYPES = ("CANVAS_DATA",)
+    RETURN_NAMES = ("canvas_data",)
     FUNCTION = "build"
 
     def build(self, bg_image, **kwargs):
@@ -169,7 +169,7 @@ class CanvasEditorFunCodeNode:
             "required": {},
             "hidden": {"unique_id": "UNIQUE_ID"},
             "optional": {
-                "fc_data_json": ("STRING", {"forceInput": True}),
+                "canvas_data": ("CANVAS_DATA", {"forceInput": True}),
             }
         }
 
@@ -187,7 +187,7 @@ class CanvasEditorFunCodeNode:
             return float(info["last_update"])
         return float("nan")
 
-    def canvas_execute(self, unique_id, fc_data_json=None):
+    def canvas_execute(self, unique_id, canvas_data=None):
         try:
             from threading import Event
             self.node_id = unique_id
@@ -195,9 +195,9 @@ class CanvasEditorFunCodeNode:
             storage = PromptServer.instance._funcode_canvas_storage
             storage[unique_id] = {"event": event, "image": None, "payload": None}
             payload = None
-            if fc_data_json:
+            if canvas_data:
                 try:
-                    payload = json.loads(fc_data_json)
+                    payload = json.loads(canvas_data)
                 except Exception:
                     payload = None
             storage[unique_id]["payload"] = payload

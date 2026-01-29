@@ -31,7 +31,7 @@ class FunCanvas {
         this.canvasHeight = 512;
         this.displayWidth = 512;
         this.displayHeight = 512;
-        this.controlHeight = 70;
+        this.controlHeight = 120; // Increased estimate for 3-row layout
         this.container = document.createElement("div");
         this.container.style.position = "relative";
         this.container.style.width = "100%";
@@ -55,9 +55,8 @@ class FunCanvas {
         this.controlPanel.style.width = "100%";
         this.controlPanel.style.flexShrink = "0";
         this.controlPanel.style.display = "flex";
-        this.controlPanel.style.flexWrap = "wrap";
-        this.controlPanel.style.gap = "6px";
-        this.controlPanel.style.alignItems = "center";
+        this.controlPanel.style.flexDirection = "column"; // Stack rows vertically
+        this.controlPanel.style.gap = "4px"; // Gap between rows
         this.controlPanel.style.marginTop = "6px";
         this.container.appendChild(this.controlPanel);
         this.layers = new Map();
@@ -143,8 +142,16 @@ class FunCanvas {
     }
 
     buildControls() {
+        const commonHeight = "28px";
+        const commonStyle = (el) => {
+             el.style.height = commonHeight;
+             el.style.boxSizing = "border-box";
+             el.style.verticalAlign = "middle"; // Ensure vertical alignment
+        };
+
         this.layerSelect = document.createElement("select");
         this.layerSelect.style.padding = "4px 6px";
+        this.layerSelect.title = "Select Active Layer";
         this.layerSelect.onchange = () => {
             const id = Number(this.layerSelect.value);
             const obj = this.layers.get(id);
@@ -164,6 +171,8 @@ class FunCanvas {
 
         this.loadBtn = document.createElement("button");
         this.loadBtn.textContent = "Load";
+        this.loadBtn.title = "Load Image from Node";
+        commonStyle(this.loadBtn);
         this.loadBtn.onclick = async () => {
             // Always use partial queue execution to ensure data format consistency (Base64 vs URL)
             // This prevents canvas reset when full queue is run subsequently.
@@ -185,24 +194,34 @@ class FunCanvas {
 
         this.resetBtn = document.createElement("button");
         this.resetBtn.textContent = "Reset";
+        this.resetBtn.title = "Clear Canvas";
+        commonStyle(this.resetBtn);
         this.resetBtn.onclick = () => this.resetCanvas();
 
         this.textBtn = document.createElement("button");
         this.textBtn.textContent = "Text";
+        this.textBtn.title = "Add Text Layer";
+        commonStyle(this.textBtn);
         this.textBtn.onclick = () => this.openTextPanel();
 
         this.saveBtn = document.createElement("button");
         this.saveBtn.textContent = "Save";
+        this.saveBtn.title = "Save to 'input/FunCodeCanvas'";
+        commonStyle(this.saveBtn);
         this.saveBtn.onclick = () => this.saveCanvas();
 
         this.importBtn = document.createElement("button");
         this.importBtn.textContent = "Import";
+        this.importBtn.title = "Import Image";
+        commonStyle(this.importBtn);
         this.importBtn.onclick = () => this.openImportGallery();
 
         this.widthInput = document.createElement("input");
         this.widthInput.type = "number";
         this.widthInput.value = String(this.canvasWidth);
         this.widthInput.style.width = "80px";
+        this.widthInput.title = "Canvas Width";
+        commonStyle(this.widthInput);
         this.widthInput.onkeydown = (e) => {
             if (e.key === "Enter") this.applyCanvasSize();
         };
@@ -211,6 +230,8 @@ class FunCanvas {
         this.heightInput.type = "number";
         this.heightInput.value = String(this.canvasHeight);
         this.heightInput.style.width = "80px";
+        this.heightInput.title = "Canvas Height";
+        commonStyle(this.heightInput);
         this.heightInput.onkeydown = (e) => {
             if (e.key === "Enter") this.applyCanvasSize();
         };
@@ -218,6 +239,12 @@ class FunCanvas {
         this.bgColorInput = document.createElement("input");
         this.bgColorInput.type = "color";
         this.bgColorInput.value = this.backgroundColor;
+        this.bgColorInput.title = "Background Color";
+        commonStyle(this.bgColorInput);
+        // Fix for color input height discrepancy: remove padding and border
+        this.bgColorInput.style.padding = "0";
+        this.bgColorInput.style.border = "none";
+        this.bgColorInput.style.width = "40px"; // Optional: set a fixed width for the color picker
         this.bgColorInput.oninput = () => {
             this.backgroundColor = this.bgColorInput.value;
             // Preview only, skip export to avoid lag
@@ -229,15 +256,46 @@ class FunCanvas {
              this.applyBackgroundColor(false);
         };
 
-        this.controlPanel.appendChild(this.layerSelect);
-        this.controlPanel.appendChild(this.loadBtn);
-        this.controlPanel.appendChild(this.resetBtn);
-        this.controlPanel.appendChild(this.textBtn);
-        this.controlPanel.appendChild(this.saveBtn);
-        this.controlPanel.appendChild(this.importBtn);
-        this.controlPanel.appendChild(this.widthInput);
-        this.controlPanel.appendChild(this.heightInput);
-        this.controlPanel.appendChild(this.bgColorInput);
+        this.applyBtn = document.createElement("button");
+        this.applyBtn.textContent = "Apply";
+        this.applyBtn.title = "Apply Size";
+        commonStyle(this.applyBtn);
+        this.applyBtn.onclick = () => this.applyCanvasSize();
+
+        // Create 3 rows for organized layout
+        const createRow = () => {
+            const row = document.createElement("div");
+            row.style.display = "flex";
+            row.style.flexWrap = "wrap";
+            row.style.gap = "6px";
+            row.style.alignItems = "center";
+            row.style.width = "100%";
+            return row;
+        };
+
+        const row1 = createRow();
+        const row2 = createRow();
+        const row3 = createRow();
+
+        // Row 1: Layer controls and Load/Reset
+        row1.appendChild(this.layerSelect);
+        row1.appendChild(this.loadBtn);
+        row1.appendChild(this.resetBtn);
+
+        // Row 2: Tools and I/O and BgColor
+        row2.appendChild(this.textBtn);
+        row2.appendChild(this.saveBtn);
+        row2.appendChild(this.importBtn);
+        row2.appendChild(this.bgColorInput);
+
+        // Row 3: Canvas properties and Apply
+        row3.appendChild(this.widthInput);
+        row3.appendChild(this.heightInput);
+        row3.appendChild(this.applyBtn);
+
+        this.controlPanel.appendChild(row1);
+        this.controlPanel.appendChild(row2);
+        this.controlPanel.appendChild(row3);
 
         this.updateLayerSelector();
     }
@@ -370,10 +428,21 @@ class FunCanvas {
         this.canvasWidth = w;
         this.canvasHeight = h;
         this.canvas.setDimensions({ width: w, height: h });
+        
+        // Fix: Re-apply background color explicitly using setBackgroundColor API
+        // Direct property assignment might be insufficient after setDimensions in some fabric versions
+        const bgColor = this.backgroundColor || "#000000";
+        this.canvas.setBackgroundColor(bgColor, () => {
+             this.canvas.renderAll();
+        });
+        // Also set property synchronously just in case
+        this.canvas.backgroundColor = bgColor;
+
         this.canvas.getObjects().forEach(obj => {
             if (obj.isBackground) return;
-            obj.scaleX *= sx;
-            obj.scaleY *= sy;
+            // Only update position to maintain relative placement, do NOT scale content
+            // obj.scaleX *= sx; 
+            // obj.scaleY *= sy;
             obj.left *= sx;
             obj.top *= sy;
             obj.setCoords();
@@ -444,13 +513,13 @@ class FunCanvas {
     scanGraphForInputs() {
         console.log("[FunCode] scanGraphForInputs started");
         // Find the connected CanvasDataFunCodeNode
-        const dataInput = this.node.inputs?.find(i => i.name === "fc_data_json");
+        const dataInput = this.node.inputs?.find(i => i.name === "canvas_data");
         if (!dataInput) {
-            console.log("[FunCode] fc_data_json input not found");
+            console.log("[FunCode] canvas_data input not found");
             return null;
         }
         if (!dataInput.link) {
-            console.log("[FunCode] fc_data_json not linked");
+            console.log("[FunCode] canvas_data not linked");
             return null;
         }
 
@@ -912,6 +981,13 @@ class FunCanvas {
         })));
         menu.appendChild(blendItem);
 
+        // 4. Opacity
+        const opacityItem = createItem("Opacity", () => {
+            console.log("[FunCode] Action: Open Opacity Panel");
+            this.openOpacityPanel(obj);
+        });
+        menu.appendChild(opacityItem);
+
         document.body.appendChild(menu);
         this.contextMenu = menu;
 
@@ -934,6 +1010,103 @@ class FunCanvas {
         }, 10);
     }
 
+
+    openOpacityPanel(obj) {
+        if (!obj) return;
+        
+        // Remove existing panel if any
+        if (this.opacityPanel) {
+            document.body.removeChild(this.opacityPanel);
+            this.opacityPanel = null;
+        }
+
+        const originalOpacity = obj.opacity !== undefined ? obj.opacity : 1;
+
+        const panel = document.createElement("div");
+        panel.style.position = "fixed";
+        panel.style.left = "50%";
+        panel.style.top = "60%"; // Slightly lower than center
+        panel.style.transform = "translate(-50%, -50%)";
+        panel.style.backgroundColor = "#2a2a2a";
+        panel.style.border = "1px solid #444";
+        panel.style.padding = "15px";
+        panel.style.borderRadius = "8px";
+        panel.style.zIndex = "10001";
+        panel.style.display = "flex";
+        panel.style.flexDirection = "column";
+        panel.style.gap = "10px";
+        panel.style.minWidth = "250px";
+        panel.style.boxShadow = "0 4px 12px rgba(0,0,0,0.5)";
+        panel.style.color = "#fff";
+        panel.style.fontFamily = "sans-serif";
+
+        // Row 1: Value Display
+        const valueRow = document.createElement("div");
+        valueRow.style.textAlign = "center";
+        valueRow.textContent = `Opacity: ${Math.round(originalOpacity * 100)}%`;
+        panel.appendChild(valueRow);
+
+        // Row 2: Slider
+        const slider = document.createElement("input");
+        slider.type = "range";
+        slider.min = "0";
+        slider.max = "100";
+        slider.value = Math.round(originalOpacity * 100);
+        slider.style.width = "100%";
+        slider.title = "Drag to adjust opacity / 拖动调整透明度";
+        slider.oninput = (e) => {
+            const val = Number(e.target.value) / 100;
+            obj.set("opacity", val);
+            this.canvas.renderAll();
+            valueRow.textContent = `Opacity: ${e.target.value}%`;
+        };
+        panel.appendChild(slider);
+
+        // Row 3: Buttons
+        const btnRow = document.createElement("div");
+        btnRow.style.display = "flex";
+        btnRow.style.justifyContent = "space-between";
+        btnRow.style.gap = "10px";
+
+        const commonBtnStyle = (btn) => {
+            btn.style.flex = "1";
+            btn.style.padding = "6px 0";
+            btn.style.cursor = "pointer";
+            btn.style.border = "1px solid #555";
+            btn.style.borderRadius = "4px";
+            btn.style.backgroundColor = "#3a3a3a";
+            btn.style.color = "#fff";
+        };
+
+        const cancelBtn = document.createElement("button");
+        cancelBtn.textContent = "Cancel";
+        cancelBtn.title = "Revert changes / 取消";
+        commonBtnStyle(cancelBtn);
+        cancelBtn.onclick = () => {
+            obj.set("opacity", originalOpacity);
+            this.canvas.renderAll();
+            document.body.removeChild(panel);
+            this.opacityPanel = null;
+        };
+
+        const confirmBtn = document.createElement("button");
+        confirmBtn.textContent = "Confirm";
+        confirmBtn.title = "Apply changes / 确定";
+        commonBtnStyle(confirmBtn);
+        confirmBtn.onclick = () => {
+            // Opacity already set during slide, just close and export
+            this.exportToServer();
+            document.body.removeChild(panel);
+            this.opacityPanel = null;
+        };
+
+        btnRow.appendChild(cancelBtn);
+        btnRow.appendChild(confirmBtn);
+        panel.appendChild(btnRow);
+
+        document.body.appendChild(panel);
+        this.opacityPanel = panel;
+    }
 
     openTextPanel() {
         if (this.textPanel) {
@@ -1255,28 +1428,48 @@ class FunCanvas {
         const data = await res.json();
         const files = Array.isArray(data.files) ? data.files : [];
         this.showGallery(files, async (filename) => {
-            const url = api.apiURL(`/view?filename=${encodeURIComponent(filename)}&type=input`);
+            // Fix: Use correct view URL logic for loading image into canvas
+            const parts = filename.split("/");
+            const realFilename = parts.pop();
+            const subfolder = parts.join("/");
+            const url = api.apiURL(`/view?filename=${encodeURIComponent(realFilename)}&type=input&subfolder=${encodeURIComponent(subfolder)}`);
+            
             await new Promise((resolve) => {
                 this.fabric.Image.fromURL(url, (img) => {
                     this.resetCanvas();
-                    // Ensure unique ID for imported image
-                    let id = this.nextLayerId;
-                    while (this.layers.has(id)) {
-                        id++;
-                    }
-                    this.nextLayerId = id + 1;
-                    img.layerId = id;
+                    // Import as BACKGROUND if it's an imported merged image
+                    // This aligns with "Import" usually meaning "Load this as my base"
+                    // And allows drawing/overlaying on top of it.
                     
-                    img.originX = "center";
-                    img.originY = "center";
-                    img.left = this.canvasWidth / 2;
-                    img.top = this.canvasHeight / 2;
-                    this.canvas.add(img);
-                    this.layers.set(img.layerId, img);
-                    this.updateLayerSelector();
-                    this.canvas.requestRenderAll();
-                    this.exportToServer();
-                    resolve();
+                    img.selectable = false;
+                    img.evented = false;
+                    img.isBackground = true;
+                    this.backgroundImage = img;
+                    
+                    // Auto-resize canvas to match imported image
+                    if (img.width && img.height) {
+                        this.setCanvasSize(img.width, img.height, true);
+                    }
+
+                    this.canvas.setBackgroundImage(img, () => {
+                         // Center the image
+                        img.originX = "center";
+                        img.originY = "center";
+                        img.left = this.canvasWidth / 2;
+                        img.top = this.canvasHeight / 2;
+                        
+                        // Fix: Force background color update if it was transparent
+                        if (!this.canvas.backgroundColor) {
+                            this.canvas.setBackgroundColor(this.backgroundColor || "#000000", () => {
+                                this.canvas.renderAll();
+                            });
+                        } else {
+                            this.canvas.renderAll();
+                        }
+                        
+                        this.exportToServer();
+                        resolve();
+                    });
                 }, { crossOrigin: "anonymous" });
             });
         });
@@ -1311,7 +1504,9 @@ class FunCanvas {
         container.style.overflowY = "auto";
         container.style.display = "grid";
         container.style.gridTemplateColumns = "repeat(auto-fill, minmax(160px, 1fr))";
+        container.style.gridAutoRows = "min-content"; // Fix: Prevent items from stretching to fill height
         container.style.gap = "12px";
+        container.style.alignContent = "start"; // Fix: Pack items to start vertically
         filenames.forEach(name => {
             const item = document.createElement("div");
             item.style.background = "#222";
@@ -1319,10 +1514,19 @@ class FunCanvas {
             item.style.borderRadius = "6px";
             item.style.cursor = "pointer";
             const img = document.createElement("img");
-            img.style.width = "100%";
-            img.style.height = "120px";
-            img.style.objectFit = "contain";
-            img.src = api.apiURL(`/view?filename=${encodeURIComponent(name)}&type=input&width=300`);
+        img.style.width = "100%";
+        img.style.height = "120px";
+        img.style.objectFit = "contain";
+        // Fix: Use correct view URL format for files in input directory
+        // The filename format from backend is "FunCodeCanvas/filename.png"
+        // But the /view endpoint expects "subfolder" and "filename" separately if possible,
+        // OR a relative path. For input folder, passing just filename usually works if it's flat.
+        // However, we are in a subfolder "FunCodeCanvas".
+        // Let's try splitting it manually.
+        const parts = name.split("/");
+        const realFilename = parts.pop();
+        const subfolder = parts.join("/");
+        img.src = api.apiURL(`/view?filename=${encodeURIComponent(realFilename)}&type=input&subfolder=${encodeURIComponent(subfolder)}`);
             const label = document.createElement("div");
             label.textContent = name.split("/").pop();
             label.style.color = "#fff";
