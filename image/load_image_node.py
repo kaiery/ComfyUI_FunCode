@@ -87,9 +87,12 @@ class LoadImageFunCodeNode:
             # alpha 通道 0~1，并转为反相掩码
             mask = np.array(i.getchannel('A')).astype(np.float32) / 255.0
             mask = 1. - torch.from_numpy(mask)
+            # 增加 batch 维度 (1, H, W)
+            mask = mask.unsqueeze(0)
         else:
-            # 无 alpha 时返回默认空遮罩
-            mask = torch.zeros((64,64), dtype=torch.float32, device="cpu")
+            # 无 alpha 时返回默认空遮罩，大小需与 image 一致 (1, H, W)
+            # image shape is (1, H, W, 3)
+            mask = torch.zeros((1, image.shape[1], image.shape[2]), dtype=torch.float32, device="cpu")
         return (image, mask)
 
     @classmethod
