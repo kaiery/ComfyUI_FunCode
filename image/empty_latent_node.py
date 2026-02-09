@@ -112,4 +112,4 @@ class EmptyLatentFunCodeNode:
             dtype=torch.float32,
             device=device,
         )
-        return ({"samples": latent}, width, height)
+        return ({"samples": latent, "downscale_ratio_spacial": 8}, width, height)
