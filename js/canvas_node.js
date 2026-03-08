@@ -69,6 +69,13 @@ class FunCanvas {
         this.textPanel = null;
         this.resizeObserver = null;
         this.isHovering = false; // Track hover state for shortcut safety
+        this.transformInputs = null;
+        this.isSyncingTransformPanel = false;
+        this.transformPrecision = 2;
+        this.scaleLockEnabled = true;
+        this.scaleLockRatio = 1;
+        this.transformClipboard = null;
+        this.transformPasteMode = "all";
         this.ready = this.init();
     }
 
@@ -159,12 +166,14 @@ class FunCanvas {
                 // Fabric.js requires setting the active object and then rendering
                 this.canvas.setActiveObject(obj);
                 this.canvas.requestRenderAll();
+                this.syncTransformPanel();
                 // Explicitly log for debugging
                 console.log("[FunCode] Layer selected via dropdown:", id, obj);
             } else {
                 // If "Layer" placeholder or invalid ID is selected, clear selection
                 this.canvas.discardActiveObject();
                 this.canvas.requestRenderAll();
+                this.syncTransformPanel();
                 console.log("[FunCode] Layer selection cleared via dropdown");
             }
         };
@@ -276,6 +285,147 @@ class FunCanvas {
         const row1 = createRow();
         const row2 = createRow();
         const row3 = createRow();
+        const row4 = createRow();
+
+        const createTransformInput = (label, unit, key, step = "1") => {
+            const wrapper = document.createElement("div");
+            wrapper.style.display = "flex";
+            wrapper.style.alignItems = "center";
+            wrapper.style.gap = "4px";
+
+            const labelEl = document.createElement("span");
+            labelEl.textContent = label;
+            labelEl.style.fontSize = "12px";
+            labelEl.style.minWidth = "40px";
+
+            const input = document.createElement("input");
+            input.type = "number";
+            input.step = step;
+            input.style.width = "76px";
+            input.title = `${label} ${key}`;
+            commonStyle(input);
+            input.oninput = () => this.applyTransformFromPanel(key);
+            input.onchange = () => this.applyTransformFromPanel(key);
+            input.onkeydown = (e) => this.handleTransformKeyStep(e, key);
+
+            const unitEl = document.createElement("span");
+            unitEl.textContent = unit;
+            unitEl.style.fontSize = "11px";
+            unitEl.style.opacity = "0.8";
+
+            wrapper.appendChild(labelEl);
+            wrapper.appendChild(input);
+            wrapper.appendChild(unitEl);
+            row4.appendChild(wrapper);
+            return input;
+        };
+
+        const posXInput = createTransformInput("X:", "px", "left");
+        const posYInput = createTransformInput("Y:", "px", "top");
+        const scaleXInput = createTransformInput("SX:", "x", "scaleX", "0.01");
+        const scaleYInput = createTransformInput("SY:", "x", "scaleY", "0.01");
+        const angleInput = createTransformInput("R:", "deg", "angle", "0.1");
+
+        const precisionWrap = document.createElement("div");
+        precisionWrap.style.display = "flex";
+        precisionWrap.style.alignItems = "center";
+        precisionWrap.style.gap = "4px";
+        const precisionLabel = document.createElement("span");
+        precisionLabel.textContent = "P:";
+        precisionLabel.style.fontSize = "12px";
+        const precisionSelect = document.createElement("select");
+        precisionSelect.style.width = "56px";
+        commonStyle(precisionSelect);
+        [0, 1, 2, 3, 4].forEach((n) => {
+            const option = document.createElement("option");
+            option.value = String(n);
+            option.textContent = String(n);
+            precisionSelect.appendChild(option);
+        });
+        precisionSelect.value = String(this.transformPrecision);
+        precisionSelect.onchange = () => {
+            this.transformPrecision = Math.max(0, Math.min(4, Number(precisionSelect.value || 2)));
+            this.updateTransformInputSteps();
+            this.syncTransformPanel();
+        };
+        precisionWrap.appendChild(precisionLabel);
+        precisionWrap.appendChild(precisionSelect);
+        row4.appendChild(precisionWrap);
+
+        const resetTransformBtn = document.createElement("button");
+        resetTransformBtn.textContent = "Reset T";
+        resetTransformBtn.title = "Reset Active Layer Transform";
+        commonStyle(resetTransformBtn);
+        resetTransformBtn.onclick = () => this.resetActiveLayerTransform();
+        row4.appendChild(resetTransformBtn);
+
+        const lockScaleBtn = document.createElement("button");
+        lockScaleBtn.title = "Lock Proportional Scaling";
+        commonStyle(lockScaleBtn);
+        lockScaleBtn.onclick = () => {
+            const obj = this.getTransformTargetObject();
+            this.setScaleLockEnabled(!this.scaleLockEnabled, obj);
+            this.syncTransformPanel();
+        };
+        row4.appendChild(lockScaleBtn);
+
+        const copyTransformBtn = document.createElement("button");
+        copyTransformBtn.textContent = "Copy T";
+        copyTransformBtn.title = "Copy Transform";
+        commonStyle(copyTransformBtn);
+        copyTransformBtn.onclick = () => this.copyTransformToMemory();
+        row4.appendChild(copyTransformBtn);
+
+        const pasteTransformBtn = document.createElement("button");
+        pasteTransformBtn.textContent = "Paste T";
+        pasteTransformBtn.title = "Paste Transform";
+        commonStyle(pasteTransformBtn);
+        pasteTransformBtn.onclick = () => this.pasteTransformFromMemory();
+        row4.appendChild(pasteTransformBtn);
+
+        const pasteModeSelect = document.createElement("select");
+        pasteModeSelect.title = "Paste Mode";
+        commonStyle(pasteModeSelect);
+        pasteModeSelect.style.width = "76px";
+        const modeAll = document.createElement("option");
+        modeAll.value = "all";
+        modeAll.textContent = "All";
+        pasteModeSelect.appendChild(modeAll);
+        const modeSR = document.createElement("option");
+        modeSR.value = "sr";
+        modeSR.textContent = "S+R";
+        pasteModeSelect.appendChild(modeSR);
+        pasteModeSelect.value = this.transformPasteMode;
+        pasteModeSelect.onchange = () => {
+            this.transformPasteMode = pasteModeSelect.value || "all";
+        };
+        row4.appendChild(pasteModeSelect);
+
+        const exportTransformBtn = document.createElement("button");
+        exportTransformBtn.textContent = "Export T";
+        exportTransformBtn.title = "Export Transform JSON";
+        commonStyle(exportTransformBtn);
+        exportTransformBtn.onclick = async () => {
+            await this.exportTransformAsJson();
+        };
+        row4.appendChild(exportTransformBtn);
+
+        const importTransformBtn = document.createElement("button");
+        importTransformBtn.textContent = "Import T";
+        importTransformBtn.title = "Import Transform JSON";
+        commonStyle(importTransformBtn);
+        importTransformBtn.onclick = async () => {
+            await this.importTransformFromJson();
+        };
+        row4.appendChild(importTransformBtn);
+
+        this.transformInputs = {
+            posXInput, posYInput, scaleXInput, scaleYInput, angleInput, precisionSelect,
+            resetTransformBtn, lockScaleBtn, copyTransformBtn, pasteTransformBtn,
+            pasteModeSelect, exportTransformBtn, importTransformBtn
+        };
+        this.updateTransformInputSteps();
+        this.setScaleLockEnabled(this.scaleLockEnabled);
 
         // Row 1: Layer controls and Load/Reset
         row1.appendChild(this.layerSelect);
@@ -293,21 +443,34 @@ class FunCanvas {
         row3.appendChild(this.heightInput);
         row3.appendChild(this.applyBtn);
 
+        // Row 4: Active layer transform
+        row4.style.marginTop = "2px";
+
         this.controlPanel.appendChild(row1);
         this.controlPanel.appendChild(row2);
         this.controlPanel.appendChild(row3);
+        this.controlPanel.appendChild(row4);
 
         this.updateLayerSelector();
+        this.syncTransformPanel();
     }
 
     bindEvents() {
         if (this.hasBoundEvents) return;
         this.hasBoundEvents = true;
 
-        this.canvas.on("selection:created", () => this.syncLayerSelect());
-        this.canvas.on("selection:updated", () => this.syncLayerSelect());
-        this.canvas.on("selection:cleared", () => this.syncLayerSelect());
+        const syncSelectionState = () => {
+            this.syncLayerSelect();
+            this.syncTransformPanel();
+        };
+        this.canvas.on("selection:created", syncSelectionState);
+        this.canvas.on("selection:updated", syncSelectionState);
+        this.canvas.on("selection:cleared", syncSelectionState);
+        this.canvas.on("object:moving", () => this.syncTransformPanel());
+        this.canvas.on("object:scaling", () => this.syncTransformPanel());
+        this.canvas.on("object:rotating", () => this.syncTransformPanel());
         this.canvas.on("object:modified", () => {
+            this.syncTransformPanel();
             this.canvas.requestRenderAll();
             this.exportToServer();
         });
@@ -500,6 +663,8 @@ class FunCanvas {
             }
         }
         this.updateLayerSelector();
+        this.syncLayerSelect();
+        this.syncTransformPanel();
         this.canvas.requestRenderAll();
         // Multiple safety renders to catch async loading/decoding
         setTimeout(() => this.canvas.requestRenderAll(), 50);
@@ -686,6 +851,19 @@ class FunCanvas {
                 img.originY = "center";
                 img.left = this.canvasWidth / 2;
                 img.top = this.canvasHeight / 2;
+                if (layer.transform) {
+                    const t = layer.transform;
+                    const left = Number(t.left);
+                    const top = Number(t.top);
+                    const scaleX = Number(t.scaleX);
+                    const scaleY = Number(t.scaleY);
+                    const angle = Number(t.angle);
+                    if (Number.isFinite(left)) img.left = left;
+                    if (Number.isFinite(top)) img.top = top;
+                    if (Number.isFinite(scaleX) && scaleX > 0) img.scaleX = scaleX;
+                    if (Number.isFinite(scaleY) && scaleY > 0) img.scaleY = scaleY;
+                    if (Number.isFinite(angle)) img.angle = angle;
+                }
                 this.canvas.add(img);
                 this.layers.set(id, img);
                 img.setCoords();
@@ -718,6 +896,7 @@ class FunCanvas {
         this.canvas.backgroundColor = this.backgroundColor;
         
         this.canvas.requestRenderAll();
+        this.syncTransformPanel();
         if (!skipExport) this.exportToServer();
     }
 
@@ -760,12 +939,333 @@ class FunCanvas {
     }
 
     syncLayerSelect() {
+        const previousValue = this.layerSelect.value;
         const obj = this.canvas.getActiveObject();
         if (obj && obj.layerId) {
             this.layerSelect.value = String(obj.layerId);
+        } else if (previousValue && this.layers.has(Number(previousValue))) {
+            this.layerSelect.value = previousValue;
         } else {
             this.layerSelect.value = "";
         }
+    }
+
+    getActiveEditableObject() {
+        const obj = this.canvas.getActiveObject();
+        if (!obj || obj.isBackground || !obj.layerId) return null;
+        return obj;
+    }
+
+    getTransformTargetObject() {
+        const active = this.getActiveEditableObject();
+        if (active) return active;
+        const selectedId = Number(this.layerSelect?.value);
+        if (!selectedId) return null;
+        return this.layers.get(selectedId) || null;
+    }
+
+    setTransformPanelEnabled(enabled) {
+        if (!this.transformInputs) return;
+        const { precisionSelect, pasteModeSelect, ...inputSet } = this.transformInputs;
+        Object.values(inputSet).forEach(input => {
+            input.disabled = !enabled;
+        });
+        if (precisionSelect) precisionSelect.disabled = false;
+        if (pasteModeSelect) pasteModeSelect.disabled = !enabled;
+    }
+
+    updateScaleLockRatioFromObject(obj) {
+        if (!obj) return;
+        const sx = Number(obj.scaleX || 1);
+        const sy = Number(obj.scaleY || 1);
+        if (!Number.isFinite(sx) || !Number.isFinite(sy) || sx === 0) return;
+        this.scaleLockRatio = sy / sx;
+        if (!Number.isFinite(this.scaleLockRatio) || this.scaleLockRatio <= 0) {
+            this.scaleLockRatio = 1;
+        }
+    }
+
+    setScaleLockEnabled(enabled, obj = null) {
+        this.scaleLockEnabled = !!enabled;
+        if (this.scaleLockEnabled) {
+            this.updateScaleLockRatioFromObject(obj || this.getTransformTargetObject());
+        }
+        if (!this.transformInputs?.lockScaleBtn) return;
+        this.transformInputs.lockScaleBtn.textContent = this.scaleLockEnabled ? "Lock S✓" : "Lock S";
+        this.transformInputs.lockScaleBtn.style.background = this.scaleLockEnabled ? "#555" : "";
+    }
+
+    updateTransformInputSteps() {
+        if (!this.transformInputs) return;
+        const p = Math.max(0, Math.min(4, Number(this.transformPrecision || 2)));
+        const posStep = String(10 ** (-p));
+        const angleStep = posStep;
+        const scaleStep = String(10 ** (-Math.max(2, p)));
+        this.transformInputs.posXInput.step = posStep;
+        this.transformInputs.posYInput.step = posStep;
+        this.transformInputs.angleInput.step = angleStep;
+        this.transformInputs.scaleXInput.step = scaleStep;
+        this.transformInputs.scaleYInput.step = scaleStep;
+    }
+
+    roundByPrecision(value, digits) {
+        return Number(Number(value).toFixed(digits));
+    }
+
+    getDisplayPrecisionForKey(key) {
+        const p = Math.max(0, Math.min(4, Number(this.transformPrecision || 2)));
+        if (key === "scaleX" || key === "scaleY") return Math.max(2, p);
+        return p;
+    }
+
+    getTransformPayloadFromObject(obj) {
+        if (!obj) return null;
+        return {
+            version: 1,
+            type: "funcode-transform",
+            transform: this.getObjectTransformSnapshot(obj)
+        };
+    }
+
+    normalizeTransformFromPayload(payload) {
+        if (!payload || typeof payload !== "object") return null;
+        const source = payload.transform && typeof payload.transform === "object" ? payload.transform : payload;
+        const left = Number(source.left);
+        const top = Number(source.top);
+        const scaleX = Number(source.scaleX);
+        const scaleY = Number(source.scaleY);
+        const angle = Number(source.angle);
+        const result = {};
+        if (Number.isFinite(left)) result.left = left;
+        if (Number.isFinite(top)) result.top = top;
+        if (Number.isFinite(scaleX) && scaleX > 0) result.scaleX = scaleX;
+        if (Number.isFinite(scaleY) && scaleY > 0) result.scaleY = scaleY;
+        if (Number.isFinite(angle)) result.angle = angle;
+        if (Object.keys(result).length === 0) return null;
+        return result;
+    }
+
+    applyTransformDataToObject(obj, transformData, mode = "all") {
+        if (!obj || !transformData) return;
+        if (mode === "all") {
+            if (Number.isFinite(transformData.left)) obj.left = transformData.left;
+            if (Number.isFinite(transformData.top)) obj.top = transformData.top;
+        }
+        if (Number.isFinite(transformData.scaleX) && transformData.scaleX > 0) obj.scaleX = transformData.scaleX;
+        if (Number.isFinite(transformData.scaleY) && transformData.scaleY > 0) obj.scaleY = transformData.scaleY;
+        if (Number.isFinite(transformData.angle)) obj.angle = transformData.angle;
+        this.updateScaleLockRatioFromObject(obj);
+        this.commitTransformUpdate(obj);
+    }
+
+    copyTransformToMemory() {
+        const obj = this.getTransformTargetObject();
+        if (!obj) return;
+        this.transformClipboard = this.getTransformPayloadFromObject(obj);
+    }
+
+    pasteTransformFromMemory() {
+        const obj = this.getTransformTargetObject();
+        if (!obj || !this.transformClipboard) return;
+        const transformData = this.normalizeTransformFromPayload(this.transformClipboard);
+        if (!transformData) return;
+        this.applyTransformDataToObject(obj, transformData, this.transformPasteMode);
+    }
+
+    async exportTransformAsJson() {
+        const obj = this.getTransformTargetObject();
+        if (!obj) return;
+        const payload = this.getTransformPayloadFromObject(obj);
+        if (!payload) return;
+        this.transformClipboard = payload;
+        const text = JSON.stringify(payload, null, 2);
+        const fileName = `transform_layer_${obj.layerId || "x"}_${Date.now()}.json`;
+        if (window.showSaveFilePicker) {
+            try {
+                const handle = await window.showSaveFilePicker({
+                    suggestedName: fileName,
+                    types: [{ description: "JSON", accept: { "application/json": [".json"] } }]
+                });
+                const writable = await handle.createWritable();
+                await writable.write(text);
+                await writable.close();
+                return;
+            } catch (error) {
+                if (error && error.name === "AbortError") return;
+            }
+        }
+        const blob = new Blob([text], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = fileName;
+        anchor.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    async importTransformFromJson() {
+        const file = await new Promise((resolve) => {
+            const input = document.createElement("input");
+            input.type = "file";
+            input.accept = ".json,application/json";
+            input.onchange = () => resolve(input.files && input.files[0] ? input.files[0] : null);
+            input.click();
+        });
+        if (!file) return;
+        try {
+            const text = await file.text();
+            const payload = JSON.parse(text);
+            const transformData = this.normalizeTransformFromPayload(payload);
+            if (!transformData) return;
+            this.transformClipboard = payload;
+            const obj = this.getTransformTargetObject();
+            if (!obj) return;
+            this.applyTransformDataToObject(obj, transformData, this.transformPasteMode);
+        } catch (error) {
+            return;
+        }
+    }
+
+    commitTransformUpdate(obj, skipExport = false) {
+        if (!obj) return;
+        obj.dirty = true;
+        obj.setCoords();
+        if (this.canvas.getActiveObject() !== obj) {
+            this.canvas.discardActiveObject();
+            this.canvas.setActiveObject(obj);
+        }
+        this.canvas.renderAll();
+        this.node.setDirtyCanvas(true, true);
+        this.syncTransformPanel();
+        if (!skipExport) this.exportToServer();
+    }
+
+    syncTransformPanel() {
+        if (!this.transformInputs) return;
+        const obj = this.getTransformTargetObject();
+        const { posXInput, posYInput, scaleXInput, scaleYInput, angleInput, resetTransformBtn } = this.transformInputs;
+        this.isSyncingTransformPanel = true;
+        if (!obj) {
+            posXInput.value = "";
+            posYInput.value = "";
+            scaleXInput.value = "";
+            scaleYInput.value = "";
+            angleInput.value = "";
+            this.setTransformPanelEnabled(false);
+            if (resetTransformBtn) resetTransformBtn.disabled = true;
+            this.isSyncingTransformPanel = false;
+            return;
+        }
+        this.updateScaleLockRatioFromObject(obj);
+        this.setTransformPanelEnabled(true);
+        if (resetTransformBtn) resetTransformBtn.disabled = false;
+        posXInput.value = String(Number(obj.left || 0).toFixed(this.getDisplayPrecisionForKey("left")));
+        posYInput.value = String(Number(obj.top || 0).toFixed(this.getDisplayPrecisionForKey("top")));
+        scaleXInput.value = String(Number(obj.scaleX || 1).toFixed(this.getDisplayPrecisionForKey("scaleX")));
+        scaleYInput.value = String(Number(obj.scaleY || 1).toFixed(this.getDisplayPrecisionForKey("scaleY")));
+        angleInput.value = String(Number(obj.angle || 0).toFixed(this.getDisplayPrecisionForKey("angle")));
+        this.isSyncingTransformPanel = false;
+    }
+
+    handleTransformKeyStep(e, key) {
+        if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+        e.preventDefault();
+        const obj = this.getTransformTargetObject();
+        if (!obj) return;
+        const base = Number(this.transformInputs?.[`${key === "left" ? "posXInput" : key === "top" ? "posYInput" : key === "angle" ? "angleInput" : key === "scaleX" ? "scaleXInput" : "scaleYInput"}`]?.step || 1);
+        const ratio = e.shiftKey ? 10 : e.altKey ? 0.1 : 1;
+        const sign = e.key === "ArrowUp" ? 1 : -1;
+        const delta = base * ratio * sign;
+        if (key === "scaleX" || key === "scaleY") {
+            const next = Number(obj[key] || 1) + delta;
+            obj[key] = Math.max(0.001, next);
+            if (this.scaleLockEnabled) {
+                const lockRatio = Number(this.scaleLockRatio || 1);
+                if (key === "scaleX") {
+                    obj.scaleY = Math.max(0.001, obj.scaleX * lockRatio);
+                } else {
+                    obj.scaleX = Math.max(0.001, obj.scaleY / (lockRatio || 1));
+                }
+            } else {
+                this.updateScaleLockRatioFromObject(obj);
+            }
+        } else if (key === "left" || key === "top") {
+            obj[key] = Number(obj[key] || 0) + delta;
+        } else if (key === "angle") {
+            obj.angle = Number(obj.angle || 0) + delta;
+        }
+        this.commitTransformUpdate(obj);
+    }
+
+    applyTransformFromPanel(changedKey = null) {
+        if (this.isSyncingTransformPanel || !this.transformInputs) return;
+        const obj = this.getTransformTargetObject();
+        if (!obj) return;
+        const { posXInput, posYInput, scaleXInput, scaleYInput, angleInput } = this.transformInputs;
+        const left = this.roundByPrecision(Number(posXInput.value), this.getDisplayPrecisionForKey("left"));
+        const top = this.roundByPrecision(Number(posYInput.value), this.getDisplayPrecisionForKey("top"));
+        const scaleX = this.roundByPrecision(Number(scaleXInput.value), this.getDisplayPrecisionForKey("scaleX"));
+        const scaleY = this.roundByPrecision(Number(scaleYInput.value), this.getDisplayPrecisionForKey("scaleY"));
+        const angle = this.roundByPrecision(Number(angleInput.value), this.getDisplayPrecisionForKey("angle"));
+        if (Number.isFinite(left)) obj.left = left;
+        if (Number.isFinite(top)) obj.top = top;
+        if (Number.isFinite(scaleX) && scaleX > 0) obj.scaleX = scaleX;
+        if (Number.isFinite(scaleY) && scaleY > 0) obj.scaleY = scaleY;
+        if (this.scaleLockEnabled && (changedKey === "scaleX" || changedKey === "scaleY")) {
+            const lockRatio = Number(this.scaleLockRatio || 1);
+            if (changedKey === "scaleX" && Number.isFinite(scaleX) && scaleX > 0) {
+                obj.scaleY = this.roundByPrecision(Math.max(0.001, scaleX * lockRatio), this.getDisplayPrecisionForKey("scaleY"));
+            } else if (changedKey === "scaleY" && Number.isFinite(scaleY) && scaleY > 0) {
+                obj.scaleX = this.roundByPrecision(Math.max(0.001, scaleY / (lockRatio || 1)), this.getDisplayPrecisionForKey("scaleX"));
+            }
+        } else if (changedKey === "scaleX" || changedKey === "scaleY") {
+            this.updateScaleLockRatioFromObject(obj);
+        }
+        if (Number.isFinite(angle)) obj.angle = angle;
+        this.commitTransformUpdate(obj);
+    }
+
+    resetActiveLayerTransform() {
+        const obj = this.getTransformTargetObject();
+        if (!obj) return;
+        obj.left = this.canvasWidth / 2;
+        obj.top = this.canvasHeight / 2;
+        obj.scaleX = 1;
+        obj.scaleY = 1;
+        obj.angle = 0;
+        this.commitTransformUpdate(obj);
+    }
+
+    getObjectTransformSnapshot(obj) {
+        return {
+            left: Number(Number(obj.left || 0).toFixed(4)),
+            top: Number(Number(obj.top || 0).toFixed(4)),
+            scaleX: Number(Number(obj.scaleX || 1).toFixed(6)),
+            scaleY: Number(Number(obj.scaleY || 1).toFixed(6)),
+            angle: Number(Number(obj.angle || 0).toFixed(4))
+        };
+    }
+
+    buildCanvasPayloadForSync() {
+        let payload = null;
+        if (this.currentCanvasData) {
+            payload = JSON.parse(JSON.stringify(this.currentCanvasData));
+        } else {
+            payload = this.scanGraphForInputs();
+        }
+        if (!payload) return null;
+        if (!Array.isArray(payload.layers)) {
+            payload.layers = [];
+        }
+        const layerMap = new Map(payload.layers.map(layer => [Number(layer.id), layer]));
+        this.layers.forEach((obj, id) => {
+            if (!obj || obj.isBackground) return;
+            const numericId = Number(id);
+            if (!layerMap.has(numericId)) return;
+            const layer = layerMap.get(numericId);
+            layer.transform = this.getObjectTransformSnapshot(obj);
+        });
+        return payload;
     }
 
     removeObject(obj, skipExport = false) {
@@ -798,6 +1298,7 @@ class FunCanvas {
         this.canvas.remove(obj);
         this.updateLayerSelector();
         this.canvas.renderAll(); // Force sync render
+        this.syncTransformPanel();
         
         if (!skipExport) this.exportToServer();
     }
@@ -1391,6 +1892,7 @@ class FunCanvas {
         this.canvas.setActiveObject(text);
         this.layers.set(id, text);
         this.updateLayerSelector();
+        this.syncTransformPanel();
         
         // Force synchronous render to ensure immediate visibility
         this.canvas.renderAll();
@@ -1408,9 +1910,14 @@ class FunCanvas {
         const dataUrl = this.canvas.toDataURL({ format: "png" });
         const nodeId = this.node.id != null ? String(this.node.id) : null;
         if (!nodeId) return;
+        const payload = this.buildCanvasPayloadForSync();
+        if (payload) {
+            this.currentCanvasData = payload;
+            this.lastPayloadString = JSON.stringify(payload);
+        }
         await api.fetchApi("/funcode/canvas_export", {
             method: "POST",
-            body: JSON.stringify({ node_id: nodeId, image_b64: dataUrl })
+            body: JSON.stringify({ node_id: nodeId, image_b64: dataUrl, payload })
         });
     }
 

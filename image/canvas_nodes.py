@@ -1,6 +1,7 @@
 import os
 import json
 import base64
+import time
 from io import BytesIO
 import numpy as np
 import torch
@@ -19,6 +20,7 @@ try:
         data = await request.json()
         node_id = data.get('node_id')
         image_b64 = data.get('image_b64')
+        payload = data.get('payload')
         if not node_id or not image_b64:
             return aiohttp.web.json_response({"status": "error"}, status=400)
         if ',' in image_b64:
@@ -38,6 +40,9 @@ try:
         if not info:
             return aiohttp.web.json_response({"status": "error"}, status=400)
         info["image"] = tensor
+        if isinstance(payload, dict):
+            info["payload"] = payload
+        info["last_update"] = time.time()
         info["event"].set()
         return aiohttp.web.json_response({"status": "ok"})
 
@@ -102,6 +107,43 @@ def _tensor_to_b64(t):
     buf = BytesIO()
     Image.fromarray(arr).save(buf, format="PNG")
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+def _merge_layer_transforms(payload, previous_payload):
+    if not isinstance(payload, dict):
+        return payload
+    if not isinstance(previous_payload, dict):
+        return payload
+    layers = payload.get("layers")
+    prev_layers = previous_payload.get("layers")
+    if not isinstance(layers, list) or not isinstance(prev_layers, list):
+        return payload
+    prev_transforms = {}
+    for layer in prev_layers:
+        if not isinstance(layer, dict):
+            continue
+        lid = layer.get("id")
+        transform = layer.get("transform")
+        if lid is None or not isinstance(transform, dict):
+            continue
+        prev_transforms[str(lid)] = transform
+    for layer in layers:
+        if not isinstance(layer, dict):
+            continue
+        lid = layer.get("id")
+        if lid is None:
+            continue
+        prev_transform = prev_transforms.get(str(lid))
+        if not isinstance(prev_transform, dict):
+            continue
+        layer["transform"] = {
+            "left": prev_transform.get("left"),
+            "top": prev_transform.get("top"),
+            "scaleX": prev_transform.get("scaleX"),
+            "scaleY": prev_transform.get("scaleY"),
+            "angle": prev_transform.get("angle"),
+        }
+    return payload
 
 
 class CanvasDataFunCodeNode:
@@ -193,6 +235,8 @@ class CanvasEditorFunCodeNode:
             self.node_id = unique_id
             event = Event()
             storage = PromptServer.instance._funcode_canvas_storage
+            prev_info = storage.get(unique_id)
+            prev_payload = prev_info.get("payload") if isinstance(prev_info, dict) else None
             storage[unique_id] = {"event": event, "image": None, "payload": None}
             payload = None
             if canvas_data:
@@ -200,6 +244,7 @@ class CanvasEditorFunCodeNode:
                     payload = json.loads(canvas_data)
                 except Exception:
                     payload = None
+            payload = _merge_layer_transforms(payload, prev_payload)
             storage[unique_id]["payload"] = payload
             PromptServer.instance.send_sync("funcode_canvas_update", {"node_id": unique_id, "canvas_data": payload})
             if not event.wait(timeout=30):
