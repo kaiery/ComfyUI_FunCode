@@ -997,7 +997,7 @@ class FunCanvas {
 
     updateTransformInputSteps() {
         if (!this.transformInputs) return;
-        const p = Math.max(0, Math.min(4, Number(this.transformPrecision || 2)));
+        const p = Math.max(0, Math.min(4, Number(this.transformPrecision ?? 2)));
         const posStep = String(10 ** (-p));
         const angleStep = posStep;
         const scaleStep = String(10 ** (-Math.max(2, p)));
@@ -1013,7 +1013,7 @@ class FunCanvas {
     }
 
     getDisplayPrecisionForKey(key) {
-        const p = Math.max(0, Math.min(4, Number(this.transformPrecision || 2)));
+        const p = Math.max(0, Math.min(4, Number(this.transformPrecision ?? 2)));
         if (key === "scaleX" || key === "scaleY") return Math.max(2, p);
         return p;
     }
