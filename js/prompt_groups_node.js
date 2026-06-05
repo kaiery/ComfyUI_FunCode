@@ -18,6 +18,11 @@ const DEFAULT_PAYLOAD = {
 const cloneDefaultPayload = () => JSON.parse(JSON.stringify(DEFAULT_PAYLOAD));
 let graphPromptHookInstalled = false;
 const MAX_EXTERNAL_GROUP_INPUTS = 50;
+const DEFAULT_TEXTAREA_HEIGHT = 96;
+const MIN_TEXTAREA_HEIGHT = 40;
+const MAX_TEXTAREA_HEIGHT = 520;
+const TEXTAREA_BOTTOM_GAP = 4;
+const NODE_BOTTOM_GUARD = 8;
 
 function makeId() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
@@ -36,6 +41,7 @@ function parsePayload(value) {
       id: String(group?.id || `group_${index + 1}`),
       name: String(group?.name || `Group ${index + 1}`),
       input_slot: Number.parseInt(group?.input_slot, 10),
+      textarea_height: normalizeTextAreaHeight(group?.textarea_height),
       text: String(group?.text || ""),
       enabled: group?.enabled !== false,
     }));
@@ -45,6 +51,12 @@ function parsePayload(value) {
     console.warn("[FunCode] Failed to parse prompt groups payload.", error);
     return cloneDefaultPayload();
   }
+}
+
+function normalizeTextAreaHeight(value) {
+  const height = Number.parseInt(value, 10);
+  if (!Number.isFinite(height)) return DEFAULT_TEXTAREA_HEIGHT;
+  return Math.max(MIN_TEXTAREA_HEIGHT, Math.min(MAX_TEXTAREA_HEIGHT, height));
 }
 
 function normalizeInputSlots(groups) {
@@ -152,14 +164,14 @@ function createButton(label, title, onClick) {
     transform: "translateY(1px)",
   };
   applyStyles(button, {
-    minHeight: "24px",
-    padding: "3px 8px",
+    minHeight: "18px",
+    padding: "2px 6px",
     border: "1px solid #555",
     borderRadius: "4px",
     background: "#2b2b2b",
     color: "#ddd",
     cursor: "pointer",
-    fontSize: "11px",
+    fontSize: "8px",
     whiteSpace: "nowrap",
     boxSizing: "border-box",
     transition: "background 120ms ease, border-color 120ms ease, color 120ms ease, transform 60ms ease, box-shadow 120ms ease",
@@ -190,14 +202,14 @@ function createInput(value, title) {
   input.title = title || "";
   applyStyles(input, {
     minWidth: "0",
-    height: "24px",
-    padding: "3px 6px",
+    height: "18px",
+    padding: "2px 6px",
     border: "1px solid #555",
     borderRadius: "4px",
     background: "#1f1f1f",
     color: "#ddd",
     boxSizing: "border-box",
-    fontSize: "12px",
+    fontSize: "8px",
   });
   return input;
 }
@@ -207,14 +219,14 @@ function createSelect(title) {
   select.title = title || "";
   applyStyles(select, {
     minWidth: "0",
-    height: "24px",
+    height: "18px",
     padding: "2px 6px",
     border: "1px solid #555",
     borderRadius: "4px",
     background: "#1f1f1f",
     color: "#ddd",
     boxSizing: "border-box",
-    fontSize: "12px",
+    fontSize: "10px",
   });
   return select;
 }
@@ -227,6 +239,10 @@ class PromptGroupsEditor {
     this.presets = [];
     this.transientPresetTargets = new Map();
     this.textWidgets = new Map();
+    this.groupItemElements = [];
+    this.toolbarElement = null;
+    this.listElement = null;
+    this.resizeFrame = null;
     this.root = document.createElement("div");
     this.root.className = "funcode-prompt-groups";
     applyStyles(this.root, {
@@ -234,12 +250,11 @@ class PromptGroupsEditor {
       maxWidth: "100%",
       minWidth: "0",
       boxSizing: "border-box",
-      padding: "6px",
+      padding: "0px",
       color: "#ddd",
       fontFamily: "Arial, sans-serif",
       fontSize: "12px",
       overflow: "visible",
-      paddingBottom: "8px",
     });
     this.persistToProperties();
     this.clearWidgetValue();
@@ -288,11 +303,25 @@ class PromptGroupsEditor {
   }
 
   getEditorWidgetHeight() {
-    return 64 + this.payload.groups.length * 198;
-  }
-
-  getNodeHeight() {
-    return 88 + this.payload.groups.length * 206;
+    if (this.groupItemElements.length === this.payload.groups.length && this.groupItemElements.length > 0) {
+      const rootStyle = getComputedStyle(this.root);
+      const toolbarStyle = this.toolbarElement ? getComputedStyle(this.toolbarElement) : null;
+      const listStyle = this.listElement ? getComputedStyle(this.listElement) : null;
+      const rootPadding =
+        Number.parseFloat(rootStyle.paddingTop || "0") +
+        Number.parseFloat(rootStyle.paddingBottom || "0");
+      const toolbarHeight = this.toolbarElement?.offsetHeight || 0;
+      const toolbarMarginBottom = toolbarStyle ? Number.parseFloat(toolbarStyle.marginBottom || "0") : 0;
+      const listGap = listStyle ? Number.parseFloat(listStyle.gap || "0") : 0;
+      const itemHeights = this.groupItemElements.reduce((total, item) => total + item.offsetHeight, 0);
+      const gapHeight = Math.max(0, this.groupItemElements.length - 1) * listGap;
+      return Math.ceil(rootPadding + toolbarHeight + toolbarMarginBottom + itemHeights + gapHeight);
+    }
+    const groupGap = Math.max(0, this.payload.groups.length - 1) * 8;
+    const groupsHeight = this.payload.groups.reduce((total, group) => {
+      return total + 62 + normalizeTextAreaHeight(group.textarea_height) + TEXTAREA_BOTTOM_GAP;
+    }, 0);
+    return 54 + groupsHeight + groupGap;
   }
 
   syncExternalInputs() {
@@ -358,9 +387,23 @@ class PromptGroupsEditor {
   }
 
   resizeNode() {
-    const height = Math.max(this.getNodeHeight(), 280);
     const width = this.node.size?.[0] || 420;
-    if (this.node.setSize) this.node.setSize([width, height]);
+    if (!this.node.setSize) return;
+    const computed = this.node.computeSize ? this.node.computeSize() : [width, this.getEditorWidgetHeight() + 80];
+    const height = Math.max(computed?.[1] || 0, this.getEditorWidgetHeight() + 72, 280) + NODE_BOTTOM_GUARD;
+    this.node.setSize([width, height]);
+  }
+
+  scheduleResizeNode() {
+    if (this.resizeFrame) cancelAnimationFrame(this.resizeFrame);
+    this.resizeFrame = requestAnimationFrame(() => {
+      this.resizeFrame = requestAnimationFrame(() => {
+        this.resizeFrame = null;
+        this.refreshTextAreaLayout();
+        this.resizeNode();
+        this.node.setDirtyCanvas(true, true);
+      });
+    });
   }
 
   addGroup() {
@@ -378,15 +421,13 @@ class PromptGroupsEditor {
     });
     this.sync();
     this.render();
-    requestAnimationFrame(() => {
-      this.refreshTextAreaLayout();
-      this.resizeNode();
-    });
+    this.scheduleResizeNode();
   }
 
   removeTextWidget(groupId) {
     const entry = this.textWidgets.get(groupId);
     if (!entry) return;
+    entry.resizeObserver?.disconnect();
     const widgetIndex = this.node.widgets?.indexOf(entry.widget);
     if (widgetIndex >= 0) this.node.widgets.splice(widgetIndex, 1);
     if (entry.wrapper?.parentNode) entry.wrapper.parentNode.removeChild(entry.wrapper);
@@ -529,6 +570,9 @@ class PromptGroupsEditor {
   render() {
     this.root.innerHTML = "";
     this.syncExternalInputs();
+    this.groupItemElements = [];
+    this.toolbarElement = null;
+    this.listElement = null;
     const activeGroupIds = new Set(this.payload.groups.map((group) => group.id));
     for (const groupId of [...this.textWidgets.keys()]) {
       if (!activeGroupIds.has(groupId)) this.removeTextWidget(groupId);
@@ -556,6 +600,7 @@ class PromptGroupsEditor {
     toolbar.appendChild(title);
     toolbar.appendChild(createButton("+ Group", "Add text group", () => this.addGroup()));
     toolbar.appendChild(createButton("Refresh", "Refresh local presets", () => this.loadPresets()));
+    this.toolbarElement = toolbar;
     this.root.appendChild(toolbar);
 
     const list = document.createElement("div");
@@ -565,8 +610,8 @@ class PromptGroupsEditor {
       gap: "8px",
       minWidth: "0",
       maxWidth: "100%",
-      paddingBottom: "6px",
     });
+    this.listElement = list;
 
     this.payload.groups.forEach((group, index) => {
       const item = document.createElement("div");
@@ -659,25 +704,23 @@ class PromptGroupsEditor {
       const textArea = this.getGroupTextArea(group, index);
       item.appendChild(textArea);
 
-      const inputHint = document.createElement("div");
-      inputHint.textContent = `External input: ${getGroupInputName(group.input_slot)} stays bound to this group and overrides this text when connected.`;
-      applyStyles(inputHint, {
-        marginTop: "4px",
-        color: "#999",
-        fontSize: "10px",
-        lineHeight: "1.3",
-        wordBreak: "break-word",
-      });
-      item.appendChild(inputHint);
+      // const inputHint = document.createElement("div");
+      // inputHint.textContent = `External input: ${getGroupInputName(group.input_slot)} stays bound to this group and overrides this text when connected.`;
+      // applyStyles(inputHint, {
+      //   marginTop: "4px",
+      //   color: "#999",
+      //   fontSize: "10px",
+      //   lineHeight: "1.3",
+      //   wordBreak: "break-word",
+      // });
+      // item.appendChild(inputHint);
 
       list.appendChild(item);
+      this.groupItemElements.push(item);
     });
 
     this.root.appendChild(list);
-    requestAnimationFrame(() => {
-      this.refreshTextAreaLayout();
-      this.resizeNode();
-    });
+    this.scheduleResizeNode();
   }
 
   getGroupTextArea(group, index) {
@@ -704,44 +747,65 @@ class PromptGroupsEditor {
         this.sync();
       });
       const wrapper = document.createElement("div");
+      const initialHeight = normalizeTextAreaHeight(group.textarea_height);
       applyStyles(wrapper, {
         width: "100%",
         maxWidth: "100%",
         minWidth: "0",
-        height: "96px",
-        minHeight: "96px",
+        height: `${initialHeight + TEXTAREA_BOTTOM_GAP}px`,
+        minHeight: `${MIN_TEXTAREA_HEIGHT + TEXTAREA_BOTTOM_GAP}px`,
         position: "relative",
         display: "block",
         boxSizing: "border-box",
         overflow: "visible",
       });
-      entry = { widget, textArea, wrapper };
+      entry = { widget, textArea, wrapper, group: null, resizeObserver: null };
+      entry.resizeObserver = new ResizeObserver(() => {
+        const nextHeight = normalizeTextAreaHeight(textArea.offsetHeight || textArea.getBoundingClientRect().height);
+        const currentHeight = normalizeTextAreaHeight(entry.group?.textarea_height);
+        if (nextHeight === currentHeight) return;
+        if (entry.group) entry.group.textarea_height = nextHeight;
+        applyStyles(wrapper, {
+          height: `${nextHeight + TEXTAREA_BOTTOM_GAP}px`,
+          minHeight: `${MIN_TEXTAREA_HEIGHT + TEXTAREA_BOTTOM_GAP}px`,
+        });
+        textArea.style.height = `${nextHeight}px`;
+        this.persistToProperties();
+        this.node.setDirtyCanvas(true, true);
+        this.scheduleResizeNode();
+      });
+      entry.resizeObserver.observe(textArea);
       this.textWidgets.set(group.id, entry);
     }
+    entry.group = group;
     entry.widget.value = group.text || "";
     entry.textArea.value = group.text || "";
     entry.textArea.placeholder = index === 0 ? "Type prompt text here..." : "";
+    const textareaHeight = normalizeTextAreaHeight(group.textarea_height);
+    applyStyles(entry.wrapper, {
+      height: `${textareaHeight + TEXTAREA_BOTTOM_GAP}px`,
+      minHeight: `${MIN_TEXTAREA_HEIGHT + TEXTAREA_BOTTOM_GAP}px`,
+    });
     applyStyles(entry.textArea, {
-      position: "absolute",
+      position: "relative",
       inset: "auto",
       display: "block",
       width: "100%",
       maxWidth: "100%",
       minWidth: "0",
-      height: "100%",
-      minHeight: "100%",
-      top: "0",
-      left: "0",
+      height: `${textareaHeight}px`,
+      minHeight: `${MIN_TEXTAREA_HEIGHT}px`,
+      maxHeight: `${MAX_TEXTAREA_HEIGHT}px`,
       resize: "vertical",
-      padding: "8px",
+      padding: "4px",
       border: "1px solid #555",
       borderRadius: "4px",
       background: "#191919",
       color: "#eee",
       boxSizing: "border-box",
-      fontSize: "12px",
+      fontSize: "10px",
       lineHeight: "1.4",
-      fontFamily: "Consolas, monospace",
+      // fontFamily: "Consolas, monospace",
       opacity: "1",
       pointerEvents: "auto",
       transform: "none",
@@ -755,18 +819,18 @@ class PromptGroupsEditor {
 
   refreshTextAreaLayout() {
     for (const entry of this.textWidgets.values()) {
+      const textareaHeight = normalizeTextAreaHeight(entry.group?.textarea_height);
       applyStyles(entry.wrapper, {
-        height: "96px",
-        minHeight: "96px",
+        height: `${textareaHeight + TEXTAREA_BOTTOM_GAP}px`,
+        minHeight: `${MIN_TEXTAREA_HEIGHT + TEXTAREA_BOTTOM_GAP}px`,
       });
       applyStyles(entry.textArea, {
-        position: "absolute",
+        position: "relative",
         display: "block",
         width: "100%",
-        height: "100%",
-        minHeight: "100%",
-        top: "0",
-        left: "0",
+        height: `${textareaHeight}px`,
+        minHeight: `${MIN_TEXTAREA_HEIGHT}px`,
+        maxHeight: `${MAX_TEXTAREA_HEIGHT}px`,
         opacity: "1",
         pointerEvents: "auto",
       });
@@ -851,6 +915,6 @@ app.registerExtension({
       260,
       Math.max(230, editor.getEditorWidgetHeight()),
     ];
-    requestAnimationFrame(() => editor.resizeNode());
+    editor.scheduleResizeNode();
   },
 });
