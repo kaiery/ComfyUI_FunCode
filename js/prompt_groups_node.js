@@ -489,6 +489,16 @@ class PromptGroupsEditor {
     this.transientPresetTargets.set(group.id, name);
   }
 
+  syncGroupTextFromElement(group) {
+    const entry = this.textWidgets.get(group.id);
+    if (!entry?.textArea) return group.text || "";
+    const text = entry.textArea.value || "";
+    group.text = text;
+    if (entry.widget) entry.widget.value = text;
+    this.persistToProperties();
+    return text;
+  }
+
   async saveSelectedPreset(group) {
     const name = this.getPresetTarget(group);
     if (!name) {
@@ -503,7 +513,9 @@ class PromptGroupsEditor {
     }
     if (!confirm(`Overwrite local preset "${name}"?`)) return;
     try {
-      this.presets = await savePreset(name, group.text || "");
+      const text = this.syncGroupTextFromElement(group);
+      this.presets = await savePreset(name, text);
+      group.text = text;
       this.setPresetTarget(group, name);
       this.render();
     } catch (error) {
@@ -522,7 +534,9 @@ class PromptGroupsEditor {
     }
     if (this.findPreset(name) && !confirm(`Preset "${name}" already exists. Overwrite it?`)) return;
     try {
-      this.presets = await savePreset(name, group.text || "");
+      const text = this.syncGroupTextFromElement(group);
+      this.presets = await savePreset(name, text);
+      group.text = text;
       this.setPresetTarget(group, name);
       this.render();
     } catch (error) {
@@ -656,7 +670,7 @@ class PromptGroupsEditor {
         this.sync();
       };
 
-      const presetSelect = createSelect("Load local preset into this group");
+      const presetSelect = createSelect("Select local preset");
       applyStyles(presetSelect, {
         flex: "1 1 150px",
         maxWidth: "100%",
@@ -665,10 +679,9 @@ class PromptGroupsEditor {
       presetSelect.onchange = () => {
         if (!presetSelect.value) {
           this.setPresetTarget(group, "");
-          this.render();
           return;
         }
-        this.loadPresetIntoGroup(group, presetSelect.value);
+        this.setPresetTarget(group, presetSelect.value);
       };
 
       const loadPresetButton = createButton("Load Preset", "Reload selected preset text into this group", () => {
