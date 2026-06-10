@@ -104,10 +104,160 @@ function getGroupInputName(index) {
   return `group_${index}_text`;
 }
 
-async function fetchPresets() {
+function compareAsciiText(a, b, direction = "asc") {
+  const left = String(a || "");
+  const right = String(b || "");
+  const length = Math.min(left.length, right.length);
+  let result = 0;
+  for (let index = 0; index < length; index += 1) {
+    const diff = left.charCodeAt(index) - right.charCodeAt(index);
+    if (diff !== 0) {
+      result = diff;
+      break;
+    }
+  }
+  if (result === 0) result = left.length - right.length;
+  return direction === "desc" ? -result : result;
+}
+
+function splitPresetPath(value) {
+  return String(value || "")
+    .replace(/\\/g, "/")
+    .split("/")
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+}
+
+function normalizePresetPath(value) {
+  return splitPresetPath(value).join("/");
+}
+
+function getPresetLabel(path) {
+  const segments = splitPresetPath(path);
+  return segments.length ? segments[segments.length - 1] : "";
+}
+
+function getPresetFolder(path) {
+  const segments = splitPresetPath(path);
+  return segments.length > 1 ? segments.slice(0, -1).join("/") : "";
+}
+
+function getFolderParents(path) {
+  const segments = splitPresetPath(path);
+  const parents = [];
+  for (let index = 1; index <= segments.length; index += 1) {
+    parents.push(segments.slice(0, index).join("/"));
+  }
+  return parents;
+}
+
+function normalizePresetData(data) {
+  const presetMap = new Map();
+  const folders = new Set();
+  for (const folder of Array.isArray(data?.folders) ? data.folders : []) {
+    const path = normalizePresetPath(folder);
+    if (!path) continue;
+    for (const parent of getFolderParents(path)) folders.add(parent);
+  }
+  for (const preset of Array.isArray(data?.presets) ? data.presets : []) {
+    const path = normalizePresetPath(preset?.path || preset?.name);
+    if (!path || presetMap.has(path)) continue;
+    const folder = getPresetFolder(path);
+    if (folder) {
+      for (const parent of getFolderParents(folder)) folders.add(parent);
+    }
+    presetMap.set(path, {
+      name: path,
+      path,
+      label: getPresetLabel(path),
+      folder,
+      text: String(preset?.text || ""),
+    });
+  }
+  return {
+    folders: [...folders].sort((a, b) => compareAsciiText(a, b)),
+    presets: [...presetMap.values()].sort((a, b) => compareAsciiText(a.name, b.name)),
+  };
+}
+
+function buildPresetTree(presets, folders, sortDirection = "asc") {
+  const root = { name: "", path: "", folders: new Map(), presets: [] };
+  const ensureFolder = (path) => {
+    let node = root;
+    let currentPath = "";
+    for (const segment of splitPresetPath(path)) {
+      currentPath = currentPath ? `${currentPath}/${segment}` : segment;
+      if (!node.folders.has(segment)) {
+        node.folders.set(segment, { name: segment, path: currentPath, folders: new Map(), presets: [] });
+      }
+      node = node.folders.get(segment);
+    }
+    return node;
+  };
+  for (const folder of folders || []) ensureFolder(folder);
+  for (const preset of presets || []) {
+    const folder = getPresetFolder(preset.name);
+    const node = folder ? ensureFolder(folder) : root;
+    node.presets.push(preset);
+  }
+  const sortNode = (node) => {
+    node.presets.sort((a, b) => compareAsciiText(a.label, b.label, sortDirection));
+    node.folders = new Map([...node.folders.entries()].sort((a, b) => compareAsciiText(a[0], b[0], sortDirection)));
+    for (const child of node.folders.values()) sortNode(child);
+  };
+  sortNode(root);
+  return root;
+}
+
+function appendTreePresetOptions(select, node, depth = 0) {
+  for (const preset of node.presets) {
+    const option = document.createElement("option");
+    option.value = preset.name;
+    option.textContent = `${"  ".repeat(depth)}${preset.label || preset.name}`;
+    select.appendChild(option);
+  }
+  for (const folder of node.folders.values()) {
+    const option = document.createElement("option");
+    option.value = `__folder__:${folder.path}`;
+    option.textContent = `${"  ".repeat(depth)}[${folder.name}]`;
+    option.disabled = true;
+    select.appendChild(option);
+    appendTreePresetOptions(select, folder, depth + 1);
+  }
+}
+
+function appendFolderOptions(select, folders, selectedPath = "", sortDirection = "asc") {
+  select.innerHTML = "";
+  const emptyOption = document.createElement("option");
+  emptyOption.value = "";
+  emptyOption.textContent = "Folder...";
+  select.appendChild(emptyOption);
+  const tree = buildPresetTree([], folders, sortDirection);
+  const appendFolders = (node, depth = 0) => {
+    for (const folder of node.folders.values()) {
+      const option = document.createElement("option");
+      option.value = folder.path;
+      option.textContent = `${"  ".repeat(depth)}${folder.name}`;
+      select.appendChild(option);
+      appendFolders(folder, depth + 1);
+    }
+  };
+  appendFolders(tree);
+  select.value = (folders || []).includes(selectedPath) ? selectedPath : "";
+}
+
+async function readPresetResponse(response, fallbackMessage) {
+  const data = await response.json();
+  if (!response.ok || data?.status === "error") {
+    throw new Error(data?.message || fallbackMessage);
+  }
+  return normalizePresetData(data);
+}
+
+async function fetchPresetData() {
   const response = await api.fetchApi("/funcode/prompt_group_presets");
   const data = await response.json();
-  return Array.isArray(data?.presets) ? data.presets : [];
+  return normalizePresetData(data);
 }
 
 async function savePreset(name, text) {
@@ -116,11 +266,7 @@ async function savePreset(name, text) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name, text }),
   });
-  const data = await response.json();
-  if (!response.ok || data?.status === "error") {
-    throw new Error(data?.message || "Failed to save preset.");
-  }
-  return Array.isArray(data?.presets) ? data.presets : [];
+  return readPresetResponse(response, "Failed to save preset.");
 }
 
 async function deletePreset(name) {
@@ -129,11 +275,34 @@ async function deletePreset(name) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name }),
   });
-  const data = await response.json();
-  if (!response.ok || data?.status === "error") {
-    throw new Error(data?.message || "Failed to delete preset.");
-  }
-  return Array.isArray(data?.presets) ? data.presets : [];
+  return readPresetResponse(response, "Failed to delete preset.");
+}
+
+async function createPresetFolder(path) {
+  const response = await api.fetchApi("/funcode/prompt_group_presets/folder/create", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
+  return readPresetResponse(response, "Failed to create folder.");
+}
+
+async function renamePresetFolder(oldPath, newPath) {
+  const response = await api.fetchApi("/funcode/prompt_group_presets/folder/rename", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ old_path: oldPath, new_path: newPath }),
+  });
+  return readPresetResponse(response, "Failed to rename folder.");
+}
+
+async function deletePresetFolder(path) {
+  const response = await api.fetchApi("/funcode/prompt_group_presets/folder/delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
+  return readPresetResponse(response, "Failed to delete folder.");
 }
 
 function applyStyles(el, styles) {
@@ -237,6 +406,9 @@ class PromptGroupsEditor {
     this.dataWidget = dataWidget;
     this.payload = parsePayload(node.properties?.prompt_groups_payload || dataWidget.value);
     this.presets = [];
+    this.presetFolders = [];
+    this.folderTarget = "";
+    this.presetSortDirection = node.properties?.prompt_preset_sort_direction === "desc" ? "desc" : "asc";
     this.transientPresetTargets = new Map();
     this.textWidgets = new Map();
     this.groupItemElements = [];
@@ -264,10 +436,18 @@ class PromptGroupsEditor {
 
   async loadPresets() {
     try {
-      this.presets = await fetchPresets();
+      this.applyPresetData(await fetchPresetData());
       this.render();
     } catch (error) {
       console.error("[FunCode] Failed to load prompt group presets.", error);
+    }
+  }
+
+  applyPresetData(data) {
+    this.presets = Array.isArray(data?.presets) ? data.presets : [];
+    this.presetFolders = Array.isArray(data?.folders) ? data.folders : [];
+    if (this.folderTarget && !this.presetFolders.includes(this.folderTarget)) {
+      this.folderTarget = "";
     }
   }
 
@@ -285,6 +465,7 @@ class PromptGroupsEditor {
     this.node.properties = this.node.properties || {};
     const payload = this.serializePayload();
     this.node.properties.prompt_groups_payload = payload;
+    this.node.properties.prompt_preset_sort_direction = this.presetSortDirection;
     this.dataWidget.value = payload;
   }
 
@@ -454,11 +635,12 @@ class PromptGroupsEditor {
   }
 
   findPreset(name) {
-    return this.presets.find((preset) => preset.name === name);
+    const path = normalizePresetPath(name);
+    return this.presets.find((preset) => preset.name === path);
   }
 
   loadPresetIntoGroup(group, name) {
-    const presetName = String(name || "").trim();
+    const presetName = normalizePresetPath(name);
     if (!presetName) {
       alert("Select a preset first.");
       return false;
@@ -482,11 +664,12 @@ class PromptGroupsEditor {
   }
 
   setPresetTarget(group, name) {
-    if (!name) {
+    const path = normalizePresetPath(name);
+    if (!path) {
       this.transientPresetTargets.delete(group.id);
       return;
     }
-    this.transientPresetTargets.set(group.id, name);
+    this.transientPresetTargets.set(group.id, path);
   }
 
   syncGroupTextFromElement(group) {
@@ -514,7 +697,7 @@ class PromptGroupsEditor {
     if (!confirm(`Overwrite local preset "${name}"?`)) return;
     try {
       const text = this.syncGroupTextFromElement(group);
-      this.presets = await savePreset(name, text);
+      this.applyPresetData(await savePreset(name, text));
       group.text = text;
       this.setPresetTarget(group, name);
       this.render();
@@ -524,10 +707,10 @@ class PromptGroupsEditor {
   }
 
   async saveAsPreset(group) {
-    const suggestedName = this.getPresetTarget(group) || "";
-    const rawName = prompt("Save as preset name:", suggestedName);
+    const suggestedName = this.getPresetTarget(group) || (this.folderTarget ? `${this.folderTarget}/` : "");
+    const rawName = prompt("Save as preset path (use / for folders):", suggestedName);
     if (rawName === null) return;
-    const name = String(rawName || "").trim();
+    const name = normalizePresetPath(rawName);
     if (!name) {
       alert("Preset name is required.");
       return;
@@ -535,7 +718,7 @@ class PromptGroupsEditor {
     if (this.findPreset(name) && !confirm(`Preset "${name}" already exists. Overwrite it?`)) return;
     try {
       const text = this.syncGroupTextFromElement(group);
-      this.presets = await savePreset(name, text);
+      this.applyPresetData(await savePreset(name, text));
       group.text = text;
       this.setPresetTarget(group, name);
       this.render();
@@ -558,11 +741,77 @@ class PromptGroupsEditor {
     }
     if (!confirm(`Delete local preset "${name}"?`)) return;
     try {
-      this.presets = await deletePreset(name);
+      this.applyPresetData(await deletePreset(name));
       this.setPresetTarget(group, "");
       this.render();
     } catch (error) {
       alert(error.message || "Failed to delete preset.");
+    }
+  }
+
+  async createFolder() {
+    const rawPath = prompt("New folder path:", this.folderTarget ? `${this.folderTarget}/` : "");
+    if (rawPath === null) return;
+    const path = normalizePresetPath(rawPath);
+    if (!path) {
+      alert("Folder path is required.");
+      return;
+    }
+    try {
+      this.applyPresetData(await createPresetFolder(path));
+      this.folderTarget = path;
+      this.render();
+    } catch (error) {
+      alert(error.message || "Failed to create folder.");
+    }
+  }
+
+  async renameFolder() {
+    const oldPath = this.folderTarget;
+    if (!oldPath) {
+      alert("Select a folder first.");
+      return;
+    }
+    const rawPath = prompt("Rename folder to:", oldPath);
+    if (rawPath === null) return;
+    const newPath = normalizePresetPath(rawPath);
+    if (!newPath) {
+      alert("Folder path is required.");
+      return;
+    }
+    try {
+      this.applyPresetData(await renamePresetFolder(oldPath, newPath));
+      this.folderTarget = newPath;
+      for (const [groupId, target] of [...this.transientPresetTargets.entries()]) {
+        if (target.startsWith(`${oldPath}/`)) {
+          this.transientPresetTargets.set(groupId, `${newPath}/${target.slice(oldPath.length + 1)}`);
+        }
+      }
+      this.render();
+    } catch (error) {
+      alert(error.message || "Failed to rename folder.");
+    }
+  }
+
+  async deleteFolder() {
+    const path = this.folderTarget;
+    if (!path) {
+      alert("Select a folder first.");
+      return;
+    }
+    const prefix = `${path}/`;
+    const presetCount = this.presets.filter((preset) => preset.name.startsWith(prefix)).length;
+    const detail = presetCount === 1 ? "1 preset" : `${presetCount} presets`;
+    if (!confirm(`Delete folder "${path}" and ${detail}?`)) return;
+    try {
+      this.applyPresetData(await deletePresetFolder(path));
+      this.folderTarget = "";
+      for (const [groupId, target] of [...this.transientPresetTargets.entries()]) {
+        if (target.startsWith(prefix)) this.transientPresetTargets.delete(groupId);
+      }
+      this.render();
+    } catch (error) {
+      alert(error.message || "Failed to delete folder.");
     }
   }
 
@@ -572,12 +821,7 @@ class PromptGroupsEditor {
     emptyOption.value = "";
     emptyOption.textContent = "Load preset...";
     select.appendChild(emptyOption);
-    for (const preset of this.presets) {
-      const option = document.createElement("option");
-      option.value = preset.name;
-      option.textContent = preset.name;
-      select.appendChild(option);
-    }
+    appendTreePresetOptions(select, buildPresetTree(this.presets, this.presetFolders, this.presetSortDirection));
     select.value = this.findPreset(selectedName) ? selectedName : "";
   }
 
@@ -613,6 +857,40 @@ class PromptGroupsEditor {
 
     toolbar.appendChild(title);
     toolbar.appendChild(createButton("+ Group", "Add text group", () => this.addGroup()));
+
+    const sortSelect = createSelect("Preset list sort order");
+    const ascOption = document.createElement("option");
+    ascOption.value = "asc";
+    ascOption.textContent = "ASCII Asc";
+    sortSelect.appendChild(ascOption);
+    const descOption = document.createElement("option");
+    descOption.value = "desc";
+    descOption.textContent = "ASCII Desc";
+    sortSelect.appendChild(descOption);
+    sortSelect.value = this.presetSortDirection;
+    applyStyles(sortSelect, {
+      flex: "0 0 84px",
+    });
+    sortSelect.onchange = () => {
+      this.presetSortDirection = sortSelect.value === "desc" ? "desc" : "asc";
+      this.persistToProperties();
+      this.render();
+    };
+    toolbar.appendChild(sortSelect);
+
+    const folderSelect = createSelect("Select preset folder");
+    applyStyles(folderSelect, {
+      flex: "1 1 150px",
+      maxWidth: "220px",
+    });
+    appendFolderOptions(folderSelect, this.presetFolders, this.folderTarget, this.presetSortDirection);
+    folderSelect.onchange = () => {
+      this.folderTarget = folderSelect.value;
+    };
+    toolbar.appendChild(folderSelect);
+    toolbar.appendChild(createButton("+ Folder", "Create preset folder", () => this.createFolder()));
+    toolbar.appendChild(createButton("Rename Folder", "Rename selected preset folder", () => this.renameFolder()));
+    toolbar.appendChild(createButton("Delete Folder", "Delete selected preset folder and contained presets", () => this.deleteFolder()));
     toolbar.appendChild(createButton("Refresh", "Refresh local presets", () => this.loadPresets()));
     this.toolbarElement = toolbar;
     this.root.appendChild(toolbar);

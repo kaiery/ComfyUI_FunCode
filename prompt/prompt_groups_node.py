@@ -25,18 +25,75 @@ def _ensure_presets_dir():
     os.makedirs(PRESETS_DIR, exist_ok=True)
 
 
-def _read_presets():
-    try:
-        _ensure_presets_dir()
-        if not os.path.exists(PRESETS_PATH):
-            return {"version": 1, "presets": []}
-        with open(PRESETS_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        return {"version": 1, "presets": []}
-    if not isinstance(data, dict):
-        return {"version": 1, "presets": []}
-    presets = data.get("presets")
+def _path_segments(value):
+    raw = str(value or "").replace("\\", "/")
+    segments = [segment.strip() for segment in raw.split("/") if segment.strip()]
+    if any(segment in (".", "..") or "\0" in segment for segment in segments):
+        raise ValueError("Preset paths cannot contain '.', '..', or null characters.")
+    return segments
+
+
+def _normalize_preset_path(value):
+    segments = _path_segments(value)
+    if not segments:
+        raise ValueError("Preset name is required.")
+    return "/".join(segments)
+
+
+def _normalize_folder_path(value):
+    segments = _path_segments(value)
+    if not segments:
+        raise ValueError("Folder path is required.")
+    return "/".join(segments)
+
+
+def _preset_folder(path):
+    segments = _path_segments(path)
+    if len(segments) <= 1:
+        return ""
+    return "/".join(segments[:-1])
+
+
+def _folder_parents(path):
+    segments = _path_segments(path)
+    parents = []
+    for index in range(1, len(segments) + 1):
+        parents.append("/".join(segments[:index]))
+    return parents
+
+
+def _add_parent_folders(folders, path):
+    folder = _preset_folder(path)
+    if not folder:
+        return
+    for parent in _folder_parents(folder):
+        folders.add(parent)
+
+
+def _clean_folder_list(folders):
+    cleaned = set()
+    if isinstance(folders, list):
+        for folder in folders:
+            try:
+                cleaned.add(_normalize_folder_path(folder))
+            except ValueError:
+                continue
+    return sorted(cleaned, key=lambda item: item.lower())
+
+
+def _format_preset(path, text):
+    segments = _path_segments(path)
+    folder = "/".join(segments[:-1])
+    return {
+        "name": "/".join(segments),
+        "path": "/".join(segments),
+        "label": segments[-1],
+        "folder": folder,
+        "text": str(text or ""),
+    }
+
+
+def _clean_preset_list(presets):
     if isinstance(presets, dict):
         presets = [{"name": k, "text": v} for k, v in presets.items()]
     if not isinstance(presets, list):
@@ -46,18 +103,51 @@ def _read_presets():
     for item in presets:
         if not isinstance(item, dict):
             continue
-        name = str(item.get("name", "")).strip()
-        if not name or name in seen:
+        raw_name = item.get("path") or item.get("name", "")
+        try:
+            name = _normalize_preset_path(raw_name)
+        except ValueError:
             continue
-        text = str(item.get("text", ""))
-        cleaned.append({"name": name, "text": text})
+        if name in seen:
+            continue
+        cleaned.append(_format_preset(name, item.get("text", "")))
         seen.add(name)
     cleaned.sort(key=lambda item: item["name"].lower())
-    return {"version": 1, "presets": cleaned}
+    return cleaned
+
+
+def _build_presets_payload(data=None):
+    data = data if isinstance(data, dict) else {}
+    presets = _clean_preset_list(data.get("presets"))
+    folders = set(_clean_folder_list(data.get("folders")))
+    for preset in presets:
+        _add_parent_folders(folders, preset["name"])
+    return {
+        "version": 2,
+        "folders": sorted(folders, key=lambda item: item.lower()),
+        "presets": presets,
+    }
+
+
+def _read_presets():
+    try:
+        _ensure_presets_dir()
+        if not os.path.exists(PRESETS_PATH):
+            return _build_presets_payload()
+        with open(PRESETS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return _build_presets_payload()
+    return _build_presets_payload(data)
 
 
 def _write_presets(data):
     _ensure_presets_dir()
+    payload = _build_presets_payload(data)
+    payload["presets"] = [
+        {"name": preset["name"], "text": preset["text"]}
+        for preset in payload["presets"]
+    ]
     fd, tmp_path = tempfile.mkstemp(
         prefix="presets_",
         suffix=".json",
@@ -66,7 +156,7 @@ def _write_presets(data):
     )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            json.dump(payload, f, ensure_ascii=False, indent=2)
             f.write("\n")
         os.replace(tmp_path, PRESETS_PATH)
     finally:
@@ -78,27 +168,109 @@ def _write_presets(data):
 
 
 def _save_preset(name, text):
-    name = str(name or "").strip()
-    if not name:
-        raise ValueError("Preset name is required.")
+    name = _normalize_preset_path(name)
     text = str(text or "")
     data = _read_presets()
     presets = [p for p in data["presets"] if p["name"] != name]
-    presets.append({"name": name, "text": text})
+    presets.append(_format_preset(name, text))
     presets.sort(key=lambda item: item["name"].lower())
     data["presets"] = presets
+    folders = set(data.get("folders", []))
+    _add_parent_folders(folders, name)
+    data["folders"] = sorted(folders, key=lambda item: item.lower())
     _write_presets(data)
-    return data
+    return _read_presets()
 
 
 def _delete_preset(name):
-    name = str(name or "").strip()
-    if not name:
-        raise ValueError("Preset name is required.")
+    name = _normalize_preset_path(name)
     data = _read_presets()
     data["presets"] = [p for p in data["presets"] if p["name"] != name]
     _write_presets(data)
-    return data
+    return _read_presets()
+
+
+def _create_folder(path):
+    folder = _normalize_folder_path(path)
+    data = _read_presets()
+    folders = set(data.get("folders", []))
+    for parent in _folder_parents(folder):
+        folders.add(parent)
+    data["folders"] = sorted(folders, key=lambda item: item.lower())
+    _write_presets(data)
+    return _read_presets()
+
+
+def _rename_folder(old_path, new_path):
+    old_path = _normalize_folder_path(old_path)
+    new_path = _normalize_folder_path(new_path)
+    if old_path == new_path:
+        return _read_presets()
+    if new_path.startswith(f"{old_path}/"):
+        raise ValueError("A folder cannot be renamed into its own child folder.")
+
+    data = _read_presets()
+    old_prefix = f"{old_path}/"
+    existing_names = {preset["name"] for preset in data["presets"]}
+    renamed_names = {}
+    matched = old_path in set(data.get("folders", []))
+
+    for preset in data["presets"]:
+        name = preset["name"]
+        if name.startswith(old_prefix):
+            matched = True
+            renamed_names[name] = f"{new_path}/{name[len(old_prefix):]}"
+
+    if not matched:
+        raise ValueError("Folder does not exist.")
+
+    for old_name, next_name in renamed_names.items():
+        if next_name in existing_names and next_name not in renamed_names:
+            raise ValueError(f'Preset "{next_name}" already exists.')
+
+    next_presets = []
+    for preset in data["presets"]:
+        name = renamed_names.get(preset["name"], preset["name"])
+        next_presets.append(_format_preset(name, preset.get("text", "")))
+
+    folders = set()
+    for folder in data.get("folders", []):
+        if folder == old_path:
+            folders.add(new_path)
+        elif folder.startswith(old_prefix):
+            folders.add(f"{new_path}/{folder[len(old_prefix):]}")
+        else:
+            folders.add(folder)
+    for parent in _folder_parents(new_path):
+        folders.add(parent)
+    for preset in next_presets:
+        _add_parent_folders(folders, preset["name"])
+
+    data["presets"] = next_presets
+    data["folders"] = sorted(folders, key=lambda item: item.lower())
+    _write_presets(data)
+    return _read_presets()
+
+
+def _delete_folder(path):
+    folder = _normalize_folder_path(path)
+    data = _read_presets()
+    prefix = f"{folder}/"
+    folders = set(data.get("folders", []))
+    matched = folder in folders or any(preset["name"].startswith(prefix) for preset in data["presets"])
+    if not matched:
+        raise ValueError("Folder does not exist.")
+
+    data["presets"] = [
+        preset for preset in data["presets"]
+        if not preset["name"].startswith(prefix)
+    ]
+    data["folders"] = sorted(
+        [item for item in folders if item != folder and not item.startswith(prefix)],
+        key=lambda item: item.lower(),
+    )
+    _write_presets(data)
+    return _read_presets()
 
 
 try:
@@ -125,6 +297,39 @@ try:
         try:
             data = await request.json()
             presets = _delete_preset(data.get("name"))
+            return aiohttp.web.json_response({"status": "ok", **presets})
+        except ValueError as exc:
+            return aiohttp.web.json_response({"status": "error", "message": str(exc)}, status=400)
+        except Exception as exc:
+            return aiohttp.web.json_response({"status": "error", "message": str(exc)}, status=500)
+
+    @PromptServer.instance.routes.post("/funcode/prompt_group_presets/folder/create")
+    async def funcode_prompt_group_preset_folder_create(request):
+        try:
+            data = await request.json()
+            presets = _create_folder(data.get("path"))
+            return aiohttp.web.json_response({"status": "ok", **presets})
+        except ValueError as exc:
+            return aiohttp.web.json_response({"status": "error", "message": str(exc)}, status=400)
+        except Exception as exc:
+            return aiohttp.web.json_response({"status": "error", "message": str(exc)}, status=500)
+
+    @PromptServer.instance.routes.post("/funcode/prompt_group_presets/folder/rename")
+    async def funcode_prompt_group_preset_folder_rename(request):
+        try:
+            data = await request.json()
+            presets = _rename_folder(data.get("old_path"), data.get("new_path"))
+            return aiohttp.web.json_response({"status": "ok", **presets})
+        except ValueError as exc:
+            return aiohttp.web.json_response({"status": "error", "message": str(exc)}, status=400)
+        except Exception as exc:
+            return aiohttp.web.json_response({"status": "error", "message": str(exc)}, status=500)
+
+    @PromptServer.instance.routes.post("/funcode/prompt_group_presets/folder/delete")
+    async def funcode_prompt_group_preset_folder_delete(request):
+        try:
+            data = await request.json()
+            presets = _delete_folder(data.get("path"))
             return aiohttp.web.json_response({"status": "ok", **presets})
         except ValueError as exc:
             return aiohttp.web.json_response({"status": "error", "message": str(exc)}, status=400)
