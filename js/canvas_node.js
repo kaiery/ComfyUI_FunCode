@@ -5,6 +5,147 @@ import { queueManager } from "./queue_shortcut.js";
 
 const instances = new Map();
 let eventsReady = false;
+const DEFAULT_CANVAS_SIZE = 512;
+const DEFAULT_BACKGROUND_COLOR = "#000000";
+const REPLACEMENT_POLICIES = new Set(["reset", "preserve_visual_size", "preserve_transform"]);
+
+const normalizeCanvasDimension = (value, fallback = DEFAULT_CANVAS_SIZE) => {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return fallback;
+    return Math.max(16, Math.round(number));
+};
+
+const normalizeBackgroundColor = (value, fallback = DEFAULT_BACKGROUND_COLOR) => {
+    if (typeof value !== "string" || !/^#[0-9a-f]{6}$/i.test(value)) return fallback;
+    return value.toLowerCase();
+};
+
+const normalizeReplacementPolicy = (value, fallback = "reset") => {
+    return REPLACEMENT_POLICIES.has(value) ? value : fallback;
+};
+
+const DEFAULT_WARP_CORNERS = [
+    { x: -0.5, y: -0.5 },
+    { x: 0.5, y: -0.5 },
+    { x: 0.5, y: 0.5 },
+    { x: -0.5, y: 0.5 },
+];
+
+const cloneWarpCorners = (corners) => corners.map(point => ({ x: point.x, y: point.y }));
+
+const normalizeWarpCorners = (corners) => {
+    if (!Array.isArray(corners) || corners.length !== 4) return null;
+    const normalized = corners.map(point => ({ x: Number(point?.x), y: Number(point?.y) }));
+    if (normalized.some(point => !Number.isFinite(point.x) || !Number.isFinite(point.y))) return null;
+    return normalized;
+};
+
+const isDefaultWarpCorners = (corners) => {
+    const normalized = normalizeWarpCorners(corners);
+    return !!normalized && normalized.every((point, index) => (
+        Math.abs(point.x - DEFAULT_WARP_CORNERS[index].x) < 1e-6
+        && Math.abs(point.y - DEFAULT_WARP_CORNERS[index].y) < 1e-6
+    ));
+};
+
+const getWarpControlPoint = (object, index, dimensions) => {
+    const corners = normalizeWarpCorners(object.warpCorners) || DEFAULT_WARP_CORNERS;
+    const flipX = object.flipX ? -1 : 1;
+    const flipY = object.flipY ? -1 : 1;
+    return {
+        x: corners[index].x * Number(dimensions?.x || object.width || 1) * flipX,
+        y: corners[index].y * Number(dimensions?.y || object.height || 1) * flipY,
+    };
+};
+
+const bilinearWarpPoint = (corners, u, v) => {
+    const topWeight = 1 - v;
+    const leftWeight = 1 - u;
+    return {
+        x: leftWeight * topWeight * corners[0].x
+            + u * topWeight * corners[1].x
+            + u * v * corners[2].x
+            + leftWeight * v * corners[3].x,
+        y: leftWeight * topWeight * corners[0].y
+            + u * topWeight * corners[1].y
+            + u * v * corners[2].y
+            + leftWeight * v * corners[3].y,
+    };
+};
+
+const drawWarpTriangle = (ctx, image, sourceRect, source, target) => {
+    const [s0, s1, s2] = source;
+    const [d0, d1, d2] = target;
+    const denominator = (s1.x - s0.x) * (s2.y - s0.y) - (s2.x - s0.x) * (s1.y - s0.y);
+    if (Math.abs(denominator) < 1e-8) return;
+
+    const a = ((d1.x - d0.x) * (s2.y - s0.y) - (d2.x - d0.x) * (s1.y - s0.y)) / denominator;
+    const c = ((s1.x - s0.x) * (d2.x - d0.x) - (s2.x - s0.x) * (d1.x - d0.x)) / denominator;
+    const e = d0.x - a * s0.x - c * s0.y;
+    const b = ((d1.y - d0.y) * (s2.y - s0.y) - (d2.y - d0.y) * (s1.y - s0.y)) / denominator;
+    const d = ((s1.x - s0.x) * (d2.y - d0.y) - (s2.x - s0.x) * (d1.y - d0.y)) / denominator;
+    const f = d0.y - b * s0.x - d * s0.y;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(d0.x, d0.y);
+    ctx.lineTo(d1.x, d1.y);
+    ctx.lineTo(d2.x, d2.y);
+    ctx.closePath();
+    ctx.clip();
+    ctx.transform(a, b, c, d, e, f);
+    ctx.drawImage(
+        image,
+        sourceRect.x, sourceRect.y, sourceRect.width, sourceRect.height,
+        0, 0, sourceRect.renderWidth, sourceRect.renderHeight
+    );
+    ctx.restore();
+};
+
+const installWarpRenderer = (object) => {
+    if (!object || object._funCodeWarpRendererInstalled) return;
+    object._funCodeWarpRendererInstalled = true;
+    object._funCodeOriginalRender = object._render;
+    object.objectCaching = false;
+    object._render = function(ctx) {
+        const normalizedCorners = normalizeWarpCorners(this.warpCorners);
+        const image = this._element;
+        if (!normalizedCorners || isDefaultWarpCorners(normalizedCorners) || !image) {
+            return this._funCodeOriginalRender.call(this, ctx);
+        }
+
+        const width = Number(this.width || image.naturalWidth || image.width || 1);
+        const height = Number(this.height || image.naturalHeight || image.height || 1);
+        const corners = normalizedCorners.map(point => ({ x: point.x * width, y: point.y * height }));
+        const sourceRect = {
+            x: Number(this.cropX || 0),
+            y: Number(this.cropY || 0),
+            width,
+            height,
+            renderWidth: width,
+            renderHeight: height,
+        };
+        const steps = 8;
+        for (let row = 0; row < steps; row += 1) {
+            const v0 = row / steps;
+            const v1 = (row + 1) / steps;
+            for (let column = 0; column < steps; column += 1) {
+                const u0 = column / steps;
+                const u1 = (column + 1) / steps;
+                const s00 = { x: u0 * width, y: v0 * height };
+                const s10 = { x: u1 * width, y: v0 * height };
+                const s11 = { x: u1 * width, y: v1 * height };
+                const s01 = { x: u0 * width, y: v1 * height };
+                const d00 = bilinearWarpPoint(corners, u0, v0);
+                const d10 = bilinearWarpPoint(corners, u1, v0);
+                const d11 = bilinearWarpPoint(corners, u1, v1);
+                const d01 = bilinearWarpPoint(corners, u0, v1);
+                drawWarpTriangle(ctx, image, sourceRect, [s00, s10, s11], [d00, d10, d11]);
+                drawWarpTriangle(ctx, image, sourceRect, [s00, s11, s01], [d00, d11, d01]);
+            }
+        }
+    };
+};
 
 const initEvents = () => {
     if (eventsReady) return;
@@ -25,12 +166,14 @@ const initEvents = () => {
 class FunCanvas {
     constructor(node) {
         this.node = node;
+        this.node.properties = this.node.properties || {};
+        const savedProperties = this.node.properties;
         this.canvas = null;
         this.fabric = null;
-        this.canvasWidth = 512;
-        this.canvasHeight = 512;
-        this.displayWidth = 512;
-        this.displayHeight = 512;
+        this.canvasWidth = normalizeCanvasDimension(savedProperties.canvasWidth);
+        this.canvasHeight = normalizeCanvasDimension(savedProperties.canvasHeight);
+        this.displayWidth = this.canvasWidth;
+        this.displayHeight = this.canvasHeight;
         this.controlHeight = 120; // Increased estimate for 3-row layout
         this.container = document.createElement("div");
         this.container.style.position = "relative";
@@ -62,7 +205,8 @@ class FunCanvas {
         this.layers = new Map();
         this.nextLayerId = 1;
         this.backgroundImage = null;
-        this.backgroundColor = "#000000";
+        this.backgroundColor = normalizeBackgroundColor(savedProperties.canvasBackgroundColor);
+        this.replacementPolicy = normalizeReplacementPolicy(savedProperties.overlayReplacementPolicy);
         this.currentCanvasData = null;
         this.pendingCanvasData = null;
         this.lastPayloadString = null;
@@ -76,6 +220,7 @@ class FunCanvas {
         this.scaleLockRatio = 1;
         this.transformClipboard = null;
         this.transformPasteMode = "all";
+        this.warpEditingObject = null;
         this.ready = this.init();
     }
 
@@ -248,7 +393,7 @@ class FunCanvas {
         this.bgColorInput = document.createElement("input");
         this.bgColorInput.type = "color";
         this.bgColorInput.value = this.backgroundColor;
-        this.bgColorInput.title = "Background Color";
+        this.bgColorInput.title = "Background Color — visible where the background image is transparent or does not cover the canvas";
         commonStyle(this.bgColorInput);
         // Fix for color input height discrepancy: remove padding and border
         this.bgColorInput.style.padding = "0";
@@ -270,6 +415,27 @@ class FunCanvas {
         this.applyBtn.title = "Apply Size";
         commonStyle(this.applyBtn);
         this.applyBtn.onclick = () => this.applyCanvasSize();
+
+        this.replacementPolicySelect = document.createElement("select");
+        this.replacementPolicySelect.title = "Behavior when an overlay image is replaced";
+        commonStyle(this.replacementPolicySelect);
+        this.replacementPolicySelect.style.maxWidth = "168px";
+        [
+            ["reset", "Replace: Reset"],
+            ["preserve_visual_size", "Replace: Keep Size"],
+            ["preserve_transform", "Replace: Keep Transform"],
+        ].forEach(([value, label]) => {
+            const option = document.createElement("option");
+            option.value = value;
+            option.textContent = label;
+            this.replacementPolicySelect.appendChild(option);
+        });
+        this.replacementPolicySelect.value = this.replacementPolicy;
+        this.replacementPolicySelect.onchange = () => {
+            this.replacementPolicy = normalizeReplacementPolicy(this.replacementPolicySelect.value);
+            this.syncCanvasMetadataToNode();
+            this.exportToServer();
+        };
 
         // Create 3 rows for organized layout
         const createRow = () => {
@@ -354,10 +520,17 @@ class FunCanvas {
 
         const resetTransformBtn = document.createElement("button");
         resetTransformBtn.textContent = "Reset T";
-        resetTransformBtn.title = "Reset Active Layer Transform";
+        resetTransformBtn.title = "Reset position, size, rotation, and flips for the active layer";
         commonStyle(resetTransformBtn);
         resetTransformBtn.onclick = () => this.resetActiveLayerTransform();
         row4.appendChild(resetTransformBtn);
+
+        const warpBtn = document.createElement("button");
+        warpBtn.textContent = "Warp";
+        warpBtn.title = "Toggle independent four-corner warp editing for the active image layer";
+        commonStyle(warpBtn);
+        warpBtn.onclick = () => this.toggleCornerWarpEditing();
+        row4.appendChild(warpBtn);
 
         const lockScaleBtn = document.createElement("button");
         lockScaleBtn.title = "Lock Proportional Scaling";
@@ -421,7 +594,7 @@ class FunCanvas {
 
         this.transformInputs = {
             posXInput, posYInput, scaleXInput, scaleYInput, angleInput, precisionSelect,
-            resetTransformBtn, lockScaleBtn, copyTransformBtn, pasteTransformBtn,
+            resetTransformBtn, warpBtn, lockScaleBtn, copyTransformBtn, pasteTransformBtn,
             pasteModeSelect, exportTransformBtn, importTransformBtn
         };
         this.updateTransformInputSteps();
@@ -431,6 +604,7 @@ class FunCanvas {
         row1.appendChild(this.layerSelect);
         row1.appendChild(this.loadBtn);
         row1.appendChild(this.resetBtn);
+        row1.appendChild(this.replacementPolicySelect);
 
         // Row 2: Tools and I/O and BgColor
         row2.appendChild(this.textBtn);
@@ -577,15 +751,35 @@ class FunCanvas {
     }
 
     applyCanvasSize() {
-        const w = Math.max(16, Number(this.widthInput.value || this.canvasWidth));
-        const h = Math.max(16, Number(this.heightInput.value || this.canvasHeight));
+        const w = normalizeCanvasDimension(this.widthInput.value, this.canvasWidth);
+        const h = normalizeCanvasDimension(this.heightInput.value, this.canvasHeight);
         this.setCanvasSize(w, h);
     }
 
+    syncCanvasMetadataToNode() {
+        this.node.properties = this.node.properties || {};
+        this.node.properties.canvasBackgroundColor = this.backgroundColor;
+        this.node.properties.canvasWidth = this.canvasWidth;
+        this.node.properties.canvasHeight = this.canvasHeight;
+        this.node.properties.overlayReplacementPolicy = this.replacementPolicy;
+    }
+
+    updateBackgroundColorHint() {
+        if (!this.bgColorInput) return;
+        this.bgColorInput.title = this.backgroundImage
+            ? "Background Color — visible only through transparent or uncovered areas of the background image"
+            : "Background Color — used as the canvas background";
+    }
+
     setCanvasSize(w, h, skipExport = false) {
+        w = normalizeCanvasDimension(w, this.canvasWidth);
+        h = normalizeCanvasDimension(h, this.canvasHeight);
         const oldW = this.canvasWidth;
         const oldH = this.canvasHeight;
-        if (w === oldW && h === oldH) return;
+        if (w === oldW && h === oldH) {
+            this.syncCanvasMetadataToNode();
+            return;
+        }
         const sx = w / oldW;
         const sy = h / oldH;
         this.canvasWidth = w;
@@ -628,13 +822,17 @@ class FunCanvas {
         } else {
              this.updateDisplayFromNodeSize(this.node.size);
         }
+        this.syncCanvasMetadataToNode();
         this.canvas.requestRenderAll();
         if (!skipExport) this.exportToServer();
     }
 
     applyBackgroundColor(skipExport = false) {
         // Direct assignment is faster and synchronous for simple hex colors
+        this.backgroundColor = normalizeBackgroundColor(this.backgroundColor);
         this.canvas.backgroundColor = this.backgroundColor;
+        this.syncCanvasMetadataToNode();
+        this.updateBackgroundColorHint();
         this.canvas.requestRenderAll();
         if (!skipExport) this.exportToServer();
     }
@@ -643,9 +841,28 @@ class FunCanvas {
         this.lastPayloadString = JSON.stringify(data);
         this.currentCanvasData = data;
         if (!data) return;
+
+        this.backgroundColor = normalizeBackgroundColor(data.backgroundColor, this.backgroundColor);
+        if (this.bgColorInput) this.bgColorInput.value = this.backgroundColor;
+        this.replacementPolicy = normalizeReplacementPolicy(data.replacementPolicy, this.replacementPolicy);
+        if (this.replacementPolicySelect) {
+            this.replacementPolicySelect.value = this.replacementPolicy;
+        }
+
+        const sizeData = data.canvasSize;
+        const hasCanvasSize = sizeData
+            && Number.isFinite(Number(sizeData.width))
+            && Number.isFinite(Number(sizeData.height));
+        const requestedWidth = hasCanvasSize
+            ? normalizeCanvasDimension(sizeData.width, this.canvasWidth)
+            : null;
+        const requestedHeight = hasCanvasSize
+            ? normalizeCanvasDimension(sizeData.height, this.canvasHeight)
+            : null;
         
         if (forceReset) {
             this.layers.clear();
+            this.warpEditingObject = null;
             this.backgroundImage = null;
             this.canvas.clear(); // Aggressive clear to ensure clean state
             this.canvas.setBackgroundColor(this.backgroundColor, () => {
@@ -656,12 +873,18 @@ class FunCanvas {
         if (data.background && data.background.image) {
             await this.setBackground(data.background.image, data.background.size, true);
         }
+        if (hasCanvasSize) {
+            this.setCanvasSize(requestedWidth, requestedHeight, true);
+        }
         if (Array.isArray(data.layers)) {
             for (const layer of data.layers) {
                 if (!layer || !layer.image) continue;
                 await this.addLayerFromData(layer);
             }
         }
+        this.canvas.backgroundColor = this.backgroundColor;
+        this.syncCanvasMetadataToNode();
+        this.updateBackgroundColorHint();
         this.updateLayerSelector();
         this.syncLayerSelect();
         this.syncTransformPanel();
@@ -809,6 +1032,7 @@ class FunCanvas {
                 img.evented = false;
                 img.isBackground = true;
                 this.backgroundImage = img;
+                this.updateBackgroundColorHint();
                 this.canvas.setBackgroundImage(img, () => {
                     if (size && size.width && size.height) {
                         this.setCanvasSize(Number(size.width), Number(size.height), true);
@@ -847,6 +1071,7 @@ class FunCanvas {
                 
                 img.layerId = id;
                 img.isBackground = false;
+                installWarpRenderer(img);
                 img.originX = "center";
                 img.originY = "center";
                 img.left = this.canvasWidth / 2;
@@ -863,6 +1088,10 @@ class FunCanvas {
                     if (Number.isFinite(scaleX) && scaleX > 0) img.scaleX = scaleX;
                     if (Number.isFinite(scaleY) && scaleY > 0) img.scaleY = scaleY;
                     if (Number.isFinite(angle)) img.angle = angle;
+                    if (typeof t.flipX === "boolean") img.flipX = t.flipX;
+                    if (typeof t.flipY === "boolean") img.flipY = t.flipY;
+                    const warpCorners = normalizeWarpCorners(t.warpCorners);
+                    if (warpCorners) img.warpCorners = cloneWarpCorners(warpCorners);
                 }
                 this.canvas.add(img);
                 this.layers.set(id, img);
@@ -874,6 +1103,7 @@ class FunCanvas {
     }
 
     clearLayers(skipExport = false) {
+        this.warpEditingObject = null;
         this.layers.forEach(obj => this.canvas.remove(obj));
         this.layers.clear();
         this.updateLayerSelector();
@@ -884,6 +1114,7 @@ class FunCanvas {
 
     resetCanvas(skipExport = false) {
         this.currentCanvasData = null; // Clear cached data
+        this.warpEditingObject = null;
         this.layers.clear();
         this.updateLayerSelector();
         this.backgroundImage = null;
@@ -894,6 +1125,7 @@ class FunCanvas {
         // Reset background properties synchronously
         this.canvas.backgroundImage = null;
         this.canvas.backgroundColor = this.backgroundColor;
+        this.updateBackgroundColorHint();
         
         this.canvas.requestRenderAll();
         this.syncTransformPanel();
@@ -962,6 +1194,86 @@ class FunCanvas {
         const selectedId = Number(this.layerSelect?.value);
         if (!selectedId) return null;
         return this.layers.get(selectedId) || null;
+    }
+
+    createWarpControls() {
+        const editor = this;
+        return [0, 1, 2, 3].reduce((controls, pointIndex) => {
+            controls[`warp${pointIndex}`] = new this.fabric.Control({
+                pointIndex,
+                actionName: "cornerWarp",
+                cursorStyle: "crosshair",
+                positionHandler(dim, finalMatrix, object) {
+                    return editor.fabric.util.transformPoint(
+                        getWarpControlPoint(object, pointIndex, dim),
+                        finalMatrix
+                    );
+                },
+                actionHandler(eventData, transform, x, y) {
+                    const target = transform.target;
+                    const local = editor.fabric.util.transformPoint(
+                        { x, y },
+                        editor.fabric.util.invertTransform(target.calcTransformMatrix())
+                    );
+                    const width = Math.max(1, Number(target.width || 1));
+                    const height = Math.max(1, Number(target.height || 1));
+                    const corners = normalizeWarpCorners(target.warpCorners)
+                        || cloneWarpCorners(DEFAULT_WARP_CORNERS);
+                    corners[pointIndex] = {
+                        x: Math.max(-4, Math.min(4, local.x / width)),
+                        y: Math.max(-4, Math.min(4, local.y / height)),
+                    };
+                    target.warpCorners = corners;
+                    target.dirty = true;
+                    target.setCoords();
+                    target.canvas?.requestRenderAll();
+                    return true;
+                },
+            });
+            return controls;
+        }, {});
+    }
+
+    setCornerWarpEditing(object, enabled) {
+        if (this.warpEditingObject && this.warpEditingObject !== object) {
+            this.setCornerWarpEditing(this.warpEditingObject, false);
+        }
+        if (!object || object.type !== "image" || object.isBackground) return;
+        installWarpRenderer(object);
+        if (enabled) {
+            if (!normalizeWarpCorners(object.warpCorners)) {
+                object.warpCorners = cloneWarpCorners(DEFAULT_WARP_CORNERS);
+            }
+            object._funCodeStandardControls = object._funCodeStandardControls
+                || object.controls
+                || this.fabric.Object.prototype.controls;
+            object.controls = this.createWarpControls();
+            object.hasBorders = false;
+            object.cornerStyle = "circle";
+            object.cornerColor = "#ffb000";
+            this.warpEditingObject = object;
+        } else {
+            object.controls = object._funCodeStandardControls || this.fabric.Object.prototype.controls;
+            object.hasBorders = true;
+            object.cornerStyle = "circle";
+            object.cornerColor = "#ffffff";
+            if (this.warpEditingObject === object) this.warpEditingObject = null;
+        }
+        object.setCoords();
+        this.canvas.requestRenderAll();
+        this.syncTransformPanel();
+    }
+
+    toggleCornerWarpEditing(object = this.getTransformTargetObject()) {
+        if (!object || object.type !== "image" || object.isBackground) return;
+        this.setCornerWarpEditing(object, this.warpEditingObject !== object);
+    }
+
+    resetObjectWarp(object) {
+        if (!object || object.type !== "image") return;
+        delete object.warpCorners;
+        object.dirty = true;
+        object.setCoords();
     }
 
     setTransformPanelEnabled(enabled) {
@@ -1041,6 +1353,10 @@ class FunCanvas {
         if (Number.isFinite(scaleX) && scaleX > 0) result.scaleX = scaleX;
         if (Number.isFinite(scaleY) && scaleY > 0) result.scaleY = scaleY;
         if (Number.isFinite(angle)) result.angle = angle;
+        if (typeof source.flipX === "boolean") result.flipX = source.flipX;
+        if (typeof source.flipY === "boolean") result.flipY = source.flipY;
+        const warpCorners = normalizeWarpCorners(source.warpCorners);
+        if (warpCorners) result.warpCorners = cloneWarpCorners(warpCorners);
         if (Object.keys(result).length === 0) return null;
         return result;
     }
@@ -1054,6 +1370,13 @@ class FunCanvas {
         if (Number.isFinite(transformData.scaleX) && transformData.scaleX > 0) obj.scaleX = transformData.scaleX;
         if (Number.isFinite(transformData.scaleY) && transformData.scaleY > 0) obj.scaleY = transformData.scaleY;
         if (Number.isFinite(transformData.angle)) obj.angle = transformData.angle;
+        if (typeof transformData.flipX === "boolean") obj.flipX = transformData.flipX;
+        if (typeof transformData.flipY === "boolean") obj.flipY = transformData.flipY;
+        const warpCorners = normalizeWarpCorners(transformData.warpCorners);
+        if (mode === "all" && warpCorners && obj.type === "image") {
+            installWarpRenderer(obj);
+            obj.warpCorners = cloneWarpCorners(warpCorners);
+        }
         this.updateScaleLockRatioFromObject(obj);
         this.commitTransformUpdate(obj);
     }
@@ -1143,7 +1466,7 @@ class FunCanvas {
     syncTransformPanel() {
         if (!this.transformInputs) return;
         const obj = this.getTransformTargetObject();
-        const { posXInput, posYInput, scaleXInput, scaleYInput, angleInput, resetTransformBtn } = this.transformInputs;
+        const { posXInput, posYInput, scaleXInput, scaleYInput, angleInput, resetTransformBtn, warpBtn } = this.transformInputs;
         this.isSyncingTransformPanel = true;
         if (!obj) {
             posXInput.value = "";
@@ -1153,12 +1476,23 @@ class FunCanvas {
             angleInput.value = "";
             this.setTransformPanelEnabled(false);
             if (resetTransformBtn) resetTransformBtn.disabled = true;
+            if (warpBtn) {
+                warpBtn.disabled = true;
+                warpBtn.textContent = "Warp";
+                warpBtn.style.background = "";
+            }
             this.isSyncingTransformPanel = false;
             return;
         }
         this.updateScaleLockRatioFromObject(obj);
         this.setTransformPanelEnabled(true);
         if (resetTransformBtn) resetTransformBtn.disabled = false;
+        if (warpBtn) {
+            const canWarp = obj.type === "image" && !obj.isBackground;
+            warpBtn.disabled = !canWarp;
+            warpBtn.textContent = canWarp && this.warpEditingObject === obj ? "Warp ✓" : "Warp";
+            warpBtn.style.background = canWarp && this.warpEditingObject === obj ? "#8a5a00" : "";
+        }
         posXInput.value = String(Number(obj.left || 0).toFixed(this.getDisplayPrecisionForKey("left")));
         posYInput.value = String(Number(obj.top || 0).toFixed(this.getDisplayPrecisionForKey("top")));
         scaleXInput.value = String(Number(obj.scaleX || 1).toFixed(this.getDisplayPrecisionForKey("scaleX")));
@@ -1225,25 +1559,47 @@ class FunCanvas {
         this.commitTransformUpdate(obj);
     }
 
-    resetActiveLayerTransform() {
-        const obj = this.getTransformTargetObject();
+    resetObjectTransform(obj, mode = "all") {
         if (!obj) return;
-        obj.left = this.canvasWidth / 2;
-        obj.top = this.canvasHeight / 2;
-        obj.scaleX = 1;
-        obj.scaleY = 1;
-        obj.angle = 0;
+        if (mode === "all" || mode === "position") {
+            obj.left = this.canvasWidth / 2;
+            obj.top = this.canvasHeight / 2;
+        }
+        if (mode === "all" || mode === "size") {
+            obj.scaleX = 1;
+            obj.scaleY = 1;
+        }
+        if (mode === "all" || mode === "rotation") {
+            obj.angle = 0;
+            obj.flipX = false;
+            obj.flipY = false;
+        }
+        if (mode === "all") {
+            this.resetObjectWarp(obj);
+        }
+        this.updateScaleLockRatioFromObject(obj);
         this.commitTransformUpdate(obj);
     }
 
+    resetActiveLayerTransform() {
+        this.resetObjectTransform(this.getTransformTargetObject(), "all");
+    }
+
     getObjectTransformSnapshot(obj) {
-        return {
+        const snapshot = {
             left: Number(Number(obj.left || 0).toFixed(4)),
             top: Number(Number(obj.top || 0).toFixed(4)),
             scaleX: Number(Number(obj.scaleX || 1).toFixed(6)),
             scaleY: Number(Number(obj.scaleY || 1).toFixed(6)),
-            angle: Number(Number(obj.angle || 0).toFixed(4))
+            angle: Number(Number(obj.angle || 0).toFixed(4)),
+            flipX: !!obj.flipX,
+            flipY: !!obj.flipY
         };
+        const warpCorners = normalizeWarpCorners(obj.warpCorners);
+        if (warpCorners && !isDefaultWarpCorners(warpCorners)) {
+            snapshot.warpCorners = cloneWarpCorners(warpCorners);
+        }
+        return snapshot;
     }
 
     buildCanvasPayloadForSync() {
@@ -1253,10 +1609,21 @@ class FunCanvas {
         } else {
             payload = this.scanGraphForInputs();
         }
-        if (!payload) return null;
+        if (!payload) {
+            payload = { background: null, layers: [] };
+        }
+        if (!("background" in payload)) {
+            payload.background = null;
+        }
         if (!Array.isArray(payload.layers)) {
             payload.layers = [];
         }
+        payload.backgroundColor = this.backgroundColor;
+        payload.canvasSize = {
+            width: this.canvasWidth,
+            height: this.canvasHeight
+        };
+        payload.replacementPolicy = this.replacementPolicy;
         const layerMap = new Map(payload.layers.map(layer => [Number(layer.id), layer]));
         this.layers.forEach((obj, id) => {
             if (!obj || obj.isBackground) return;
@@ -1270,6 +1637,7 @@ class FunCanvas {
 
     removeObject(obj, skipExport = false) {
         if (!obj) return;
+        if (this.warpEditingObject === obj) this.warpEditingObject = null;
         
         // Handle multi-selection (ActiveSelection)
         if (obj.type === 'activeSelection' && typeof obj.getObjects === 'function') {
@@ -1389,6 +1757,27 @@ class FunCanvas {
         // 1. Transform
         const transformItem = createItem("Transform", null, true);
         createSubmenu(transformItem, [
+            { text: "Reset All", action: () => {
+                this.resetObjectTransform(obj, "all");
+            }},
+            { text: "Reset Position", action: () => {
+                this.resetObjectTransform(obj, "position");
+            }},
+            { text: "Reset Size", action: () => {
+                this.resetObjectTransform(obj, "size");
+            }},
+            { text: "Reset Rotation & Flip", action: () => {
+                this.resetObjectTransform(obj, "rotation");
+            }},
+            ...(obj.type === "image" ? [
+                { text: this.warpEditingObject === obj ? "Exit Corner Warp" : "Edit Corner Warp", action: () => {
+                    this.toggleCornerWarpEditing(obj);
+                }},
+                { text: "Reset Corner Warp", action: () => {
+                    this.resetObjectWarp(obj);
+                    this.commitTransformUpdate(obj);
+                }},
+            ] : []),
             { text: "Flip Horizontal", action: () => { 
                 console.log("[FunCode] Action: Flip Horizontal");
                 obj.set('flipX', !obj.flipX); 
@@ -1952,6 +2341,7 @@ class FunCanvas {
                     img.evented = false;
                     img.isBackground = true;
                     this.backgroundImage = img;
+                    this.updateBackgroundColorHint();
                     
                     // Auto-resize canvas to match imported image
                     if (img.width && img.height) {
@@ -2171,7 +2561,6 @@ app.registerExtension({
                         requestAnimationFrame(() => {
                              this.canvasInstance.applyBackgroundColor(false); // Apply color
                              this.canvasInstance.canvas.requestRenderAll();   // Render visual
-                             this.canvasInstance.exportToServer();            // Sync to backend
                              // Also try to fetch just in case, but rely on local default
                              this.canvasInstance.fetchAndApplyLatestData(true);
                         });
@@ -2182,6 +2571,40 @@ app.registerExtension({
                     this.setDirtyCanvas(true, true);
                 });
                 instances.set(String(this.id), this.canvasInstance);
+            };
+            const onConfigure = nodeType.prototype.onConfigure;
+            nodeType.prototype.onConfigure = function(o) {
+                const res = onConfigure?.apply(this, arguments);
+                const instance = this.canvasInstance;
+                if (!instance || !o?.properties) return res;
+
+                const color = normalizeBackgroundColor(
+                    o.properties.canvasBackgroundColor,
+                    instance.backgroundColor
+                );
+                const width = normalizeCanvasDimension(
+                    o.properties.canvasWidth,
+                    instance.canvasWidth
+                );
+                const height = normalizeCanvasDimension(
+                    o.properties.canvasHeight,
+                    instance.canvasHeight
+                );
+                const replacementPolicy = normalizeReplacementPolicy(
+                    o.properties.overlayReplacementPolicy,
+                    instance.replacementPolicy
+                );
+                instance.ensureReady().then(() => {
+                    instance.backgroundColor = color;
+                    instance.replacementPolicy = replacementPolicy;
+                    if (instance.bgColorInput) instance.bgColorInput.value = color;
+                    if (instance.replacementPolicySelect) {
+                        instance.replacementPolicySelect.value = replacementPolicy;
+                    }
+                    instance.setCanvasSize(width, height, true);
+                    instance.applyBackgroundColor(true);
+                });
+                return res;
             };
             const onRemoved = nodeType.prototype.onRemoved;
             nodeType.prototype.onRemoved = function() {

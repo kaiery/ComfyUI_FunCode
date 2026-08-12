@@ -529,4 +529,9 @@ function showGallery(widget, node) {
     refreshGallery();
 
     document.body.appendChild(overlay);
+    requestAnimationFrame(() => {
+        if (document.body.contains(overlay)) {
+            filterInput.focus({ preventScroll: true });
+        }
+    });
 }
