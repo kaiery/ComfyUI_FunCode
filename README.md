@@ -80,10 +80,21 @@
 
 如需在节点里通过下拉快速切换多套配置，可添加多 Profile（示例见 .env.example）。
 
+- 选择默认配置或已配置的 Profile：仅使用该配置的 `api_base`、`api_key`、`model`，面板中的值会被忽略，即使配置字段为空也不会回退到面板值。
+- 选择“自定义”：使用面板中的这三个字段。
+
 ### 2) 系统提示词模板（可选）
 
-将系统提示词文件放到：`llm/system_prompts/`
+将系统提示词文件放到项目根目录：`ComfyUI_FunCode/system_prompts/`（节点加载时自动创建）。旧目录 `llm/system_prompts/` 中的文件需移动到新目录。
 
 - 支持：`.md` / `.txt`
 - 节点下拉会自动加载目录内所有文件
 - 选择 `custom`：使用面板输入框内容
+
+### 3) 可选图片与采样参数
+
+- 图片可不连接；初始显示 `image`，连接后自动显示下一个备用接口，最多为 `image`、`image_2` … `image_10`。断开连接后收起多余的末尾空接口。
+- 图片按接口编号顺序发送；每个接口沿用原有行为，使用图像批次中的第一张图片。服务端需支持多图输入。
+- 新增参数默认值：`top_k=0`、`min_p=0.0`、`repeat_penalty=1.0`、`presence_penalty=0.0`、`frequency_penalty=0.0`。
+- 为兼容不同服务，`top_k`、`min_p`、`repeat_penalty` 在上述默认值时不发送，使用服务端默认行为；修改后分别以 `top_k`、`min_p`、`repetition_penalty` 发送，需服务端支持。两个 penalty 参数始终发送。
+- 更新后重启 ComfyUI 并刷新浏览器，以加载动态图片接口扩展。

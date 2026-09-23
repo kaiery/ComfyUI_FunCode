@@ -80,7 +80,7 @@ def collect_profiles():
 
 
 def _prompts_dir():
-    return os.path.join(os.path.dirname(__file__), "system_prompts")
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "system_prompts")
 
 
 def collect_system_prompts():
@@ -156,7 +156,9 @@ def build_messages(system_prompt, user_prompt, image_data_url):
         content = []
         if user_prompt:
             content.append({"type": "text", "text": user_prompt})
-        content.append({"type": "image_url", "image_url": {"url": image_data_url}})
+        image_urls = [image_data_url] if isinstance(image_data_url, str) else image_data_url
+        for url in image_urls:
+            content.append({"type": "image_url", "image_url": {"url": url}})
         messages.append({"role": "user", "content": content})
     elif user_prompt:
         messages.append({"role": "user", "content": user_prompt})
@@ -179,13 +181,19 @@ def normalize_api_url(api_base):
     return api_base
 
 
-def call_llm(api_base, api_key, model, system_prompt, user_prompt, image, temperature, top_p, max_tokens, timeout, seed=None):
+def call_llm(api_base, api_key, model, system_prompt, user_prompt, image, temperature, top_p, max_tokens, timeout, seed=None,
+             top_k=0, min_p=0.0, repeat_penalty=1.0, presence_penalty=0.0, frequency_penalty=0.0):
     url = normalize_api_url(api_base)
     
     # Explicitly handle image processing
-    image_data_url = None
-    if image is not None:
-        image_data_url = image_to_data_url(image)
+    images = image if isinstance(image, (list, tuple)) else [image]
+    image_data_url = []
+    for item in images:
+        if item is not None:
+            encoded = image_to_data_url(item)
+            if encoded is None:
+                raise ValueError("Unsupported image input")
+            image_data_url.append(encoded)
         
     messages = build_messages(system_prompt, user_prompt, image_data_url)
     payload = {
@@ -193,7 +201,17 @@ def call_llm(api_base, api_key, model, system_prompt, user_prompt, image, temper
         "messages": messages,
         "temperature": temperature,
         "top_p": top_p,
+        "presence_penalty": presence_penalty,
+        "frequency_penalty": frequency_penalty,
     }
+    # Nonstandard sampling options are omitted at neutral defaults so that
+    # OpenAI-compatible services without these extensions continue to work.
+    if top_k > 0:
+        payload["top_k"] = top_k
+    if min_p > 0:
+        payload["min_p"] = min_p
+    if repeat_penalty != 1.0:
+        payload["repetition_penalty"] = repeat_penalty
     if seed is not None:
         payload["seed"] = seed
     if max_tokens and max_tokens > 0:
@@ -226,10 +244,7 @@ class AnyLLMFunCodeNode:
         # Look for .env in the parent directory (package root)
         env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
         load_env_file(env_path)
-        labels, mapping = collect_profiles()
-        default_key = env_default("LLM_API_KEY", "")
-        default_base = env_default("LLM_API_BASE", "")
-        default_model = env_default("LLM_MODEL", "")
+        labels, _ = collect_profiles()
         profile_choices = [_default_profile_label, _custom_profile_label] + labels
         prompt_labels, _prompt_mapping = collect_system_prompts()
         system_prompt_choices = ["custom"] + prompt_labels
@@ -247,8 +262,13 @@ class AnyLLMFunCodeNode:
                 "top_p": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "max_tokens": ("INT", {"default": 2048, "min": 1, "max": 8192, "step": 1}),
                 "timeout": ("INT", {"default": 60, "min": 1, "max": 600, "step": 1}),
+                "top_k": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1}),
+                "min_p": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "repeat_penalty": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 2.0, "step": 0.01}),
+                "presence_penalty": ("FLOAT", {"default": 0.0, "min": -2.0, "max": 2.0, "step": 0.01}),
+                "frequency_penalty": ("FLOAT", {"default": 0.0, "min": -2.0, "max": 2.0, "step": 0.01}),
             },
-            "optional": {"image": ("IMAGE",)},
+            "optional": {"image": ("IMAGE",), **{f"image_{i}": ("IMAGE",) for i in range(2, 11)}},
         }
 
     RETURN_TYPES = ("STRING",)
@@ -256,7 +276,8 @@ class AnyLLMFunCodeNode:
     FUNCTION = "run"
     CATEGORY = "FunCode/LLM"
 
-    def run(self, profile, api_base, api_key, model, seed, system_prompt_select, system_prompt, user_prompt, temperature, top_p, max_tokens, timeout, image=None):
+    def run(self, profile, api_base, api_key, model, seed, system_prompt_select, system_prompt, user_prompt, temperature, top_p, max_tokens, timeout, image=None,
+            top_k=0, min_p=0.0, repeat_penalty=1.0, presence_penalty=0.0, frequency_penalty=0.0, **kwargs):
         # Look for .env in the parent directory (package root)
         env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
         load_env_file(env_path)
@@ -265,7 +286,7 @@ class AnyLLMFunCodeNode:
         default_key = env_default("LLM_API_KEY", "")
         default_model = env_default("LLM_MODEL", "")
 
-        # 1. Determine base config from Profile
+        # Only the custom profile reads credentials and model from the panel.
         config_base = ""
         config_key = ""
         config_model = ""
@@ -279,13 +300,12 @@ class AnyLLMFunCodeNode:
             config_base = profile_data.get("api_base", "")
             config_key = profile_data.get("api_key", "")
             config_model = profile_data.get("model", "")
-        
-        # 2. Apply UI overrides (if provided)
-        # If UI field is NOT empty, it overrides the profile config
-        # If UI field IS empty, we use the profile config
-        final_base = api_base if api_base else config_base
-        final_key = api_key if api_key else config_key
-        final_model = model if model else config_model
+        elif profile == _custom_profile_label:
+            config_base, config_key, config_model = api_base, api_key, model
+        else:
+            return ("ERROR: Unknown profile: " + str(profile),)
+
+        final_base, final_key, final_model = config_base, config_key, config_model
 
         if not final_base or not final_model:
             return ("ERROR: api_base and model are required (configure in .env or enter manually)",)
@@ -294,7 +314,10 @@ class AnyLLMFunCodeNode:
             prompt_labels, prompt_mapping = collect_system_prompts()
             if system_prompt_select != "custom" and system_prompt_select in prompt_mapping:
                 system_prompt = prompt_mapping[system_prompt_select]
-            result = call_llm(final_base, final_key, final_model, system_prompt, user_prompt, image, temperature, top_p, max_tokens, timeout, seed)
+            images = [image] + [kwargs.get(f"image_{i}") for i in range(2, 11)]
+            result = call_llm(final_base, final_key, final_model, system_prompt, user_prompt, images, temperature, top_p, max_tokens, timeout, seed,
+                              top_k=top_k, min_p=min_p, repeat_penalty=repeat_penalty,
+                              presence_penalty=presence_penalty, frequency_penalty=frequency_penalty)
             return (result,)
         except Exception as e:
             return ("ERROR: " + type(e).__name__ + ": " + str(e),)
