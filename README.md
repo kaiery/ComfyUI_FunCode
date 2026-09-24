@@ -90,11 +90,12 @@
 - 支持：`.md` / `.txt`
 - 节点下拉会自动加载目录内所有文件
 - 选择 `custom`：使用面板输入框内容
+- `system_prompt` 和 `user_prompt` 初始布局高度各为 120；拖动节点边框调整高度时，两个文本框均分高度变化（最低各 60）。保存工作流时记录布局高度，再次打开时恢复，不随文本长度或画布缩放增长。
 
 ### 3) 可选图片与采样参数
 
 - 图片可不连接；初始显示 `image`，连接后自动显示下一个备用接口，最多为 `image`、`image_2` … `image_10`。断开连接后收起多余的末尾空接口。
 - 图片按接口编号顺序发送；每个接口沿用原有行为，使用图像批次中的第一张图片。服务端需支持多图输入。
-- 新增参数默认值：`top_k=0`、`min_p=0.0`、`repeat_penalty=1.0`、`presence_penalty=0.0`、`frequency_penalty=0.0`。
-- 为兼容不同服务，`top_k`、`min_p`、`repeat_penalty` 在上述默认值时不发送，使用服务端默认行为；修改后分别以 `top_k`、`min_p`、`repetition_penalty` 发送，需服务端支持。两个 penalty 参数始终发送。
+- 平衡采样默认值：`temperature=0.60`、`top_p=0.95`、`top_k=20`、`min_p=0.00`、`repeat_penalty=1.05`、`presence_penalty=0.00`、`frequency_penalty=0.00`。新建节点使用这些值，已有工作流保留其保存的参数。
+- `top_k`、`min_p`、`repeat_penalty` 分别以 `top_k`、`min_p`、`repetition_penalty` 发送，需服务端支持。设为 `0`、`0.0`、`1.0` 时对应字段不发送，使用服务端默认行为；`presence_penalty` 和 `frequency_penalty` 始终发送。
 - 更新后重启 ComfyUI 并刷新浏览器，以加载动态图片接口扩展。

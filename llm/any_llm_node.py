@@ -182,7 +182,7 @@ def normalize_api_url(api_base):
 
 
 def call_llm(api_base, api_key, model, system_prompt, user_prompt, image, temperature, top_p, max_tokens, timeout, seed=None,
-             top_k=0, min_p=0.0, repeat_penalty=1.0, presence_penalty=0.0, frequency_penalty=0.0):
+             top_k=20, min_p=0.0, repeat_penalty=1.05, presence_penalty=0.0, frequency_penalty=0.0):
     url = normalize_api_url(api_base)
     
     # Explicitly handle image processing
@@ -258,13 +258,13 @@ class AnyLLMFunCodeNode:
                 "system_prompt_select": (system_prompt_choices,),
                 "system_prompt": ("STRING", {"multiline": True, "default": ""}),
                 "user_prompt": ("STRING", {"multiline": True, "default": ""}),
-                "temperature": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 2.0, "step": 0.01}),
-                "top_p": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "temperature": ("FLOAT", {"default": 0.6, "min": 0.0, "max": 2.0, "step": 0.01}),
+                "top_p": ("FLOAT", {"default": 0.95, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "max_tokens": ("INT", {"default": 2048, "min": 1, "max": 8192, "step": 1}),
                 "timeout": ("INT", {"default": 60, "min": 1, "max": 600, "step": 1}),
-                "top_k": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1}),
+                "top_k": ("INT", {"default": 20, "min": 0, "max": 100000, "step": 1}),
                 "min_p": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "repeat_penalty": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 2.0, "step": 0.01}),
+                "repeat_penalty": ("FLOAT", {"default": 1.05, "min": 0.01, "max": 2.0, "step": 0.01}),
                 "presence_penalty": ("FLOAT", {"default": 0.0, "min": -2.0, "max": 2.0, "step": 0.01}),
                 "frequency_penalty": ("FLOAT", {"default": 0.0, "min": -2.0, "max": 2.0, "step": 0.01}),
             },
@@ -277,7 +277,7 @@ class AnyLLMFunCodeNode:
     CATEGORY = "FunCode/LLM"
 
     def run(self, profile, api_base, api_key, model, seed, system_prompt_select, system_prompt, user_prompt, temperature, top_p, max_tokens, timeout, image=None,
-            top_k=0, min_p=0.0, repeat_penalty=1.0, presence_penalty=0.0, frequency_penalty=0.0, **kwargs):
+            top_k=20, min_p=0.0, repeat_penalty=1.05, presence_penalty=0.0, frequency_penalty=0.0, **kwargs):
         # Look for .env in the parent directory (package root)
         env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
         load_env_file(env_path)
