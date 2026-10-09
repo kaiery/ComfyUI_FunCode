@@ -43,6 +43,8 @@ function showGallery(widget, node) {
         display: "flex",
         justifyContent: "space-between",
         alignItems: "center",
+        flexWrap: "wrap",
+        gap: "12px",
         marginBottom: "20px",
         color: "#fff"
     });
@@ -80,6 +82,7 @@ function showGallery(widget, node) {
     Object.assign(controls.style, {
         display: "flex",
         alignItems: "center",
+        flexWrap: "wrap",
         gap: "8px"
     });
 
@@ -183,17 +186,31 @@ function showGallery(widget, node) {
         fontSize: "13px"
     });
     const sortOptions = [
-        { value: "default", label: "Sort: default" },
+        { value: "mtime_desc", label: "Sort: Modified (newest first)" },
+        { value: "default", label: "Sort: Filename (original)" },
         { value: "ascii_asc", label: "Sort: ASCII A→Z" },
         { value: "ascii_desc", label: "Sort: ASCII Z→A" },
-        { value: "mtime_asc", label: "Sort: Modified ↑" },
-        { value: "mtime_desc", label: "Sort: Modified ↓" },
+        { value: "mtime_asc", label: "Sort: Modified (oldest first)" },
     ];
     sortOptions.forEach(o => {
         const opt = document.createElement("option");
         opt.value = o.value;
         opt.textContent = o.label;
         sortSelect.appendChild(opt);
+    });
+    sortSelect.value = "mtime_desc";
+
+    const refreshBtn = document.createElement("button");
+    refreshBtn.textContent = "Refresh";
+    refreshBtn.title = "Reload input images and modification times";
+    Object.assign(refreshBtn.style, {
+        padding: "6px 12px",
+        cursor: "pointer",
+        backgroundColor: "#444",
+        color: "#fff",
+        border: "none",
+        borderRadius: "4px",
+        fontSize: "13px"
     });
 
     const filterInput = document.createElement("input");
@@ -219,6 +236,7 @@ function showGallery(widget, node) {
     controls.appendChild(sizeRange);
     controls.appendChild(sortSelect);
     controls.appendChild(filterInput);
+    controls.appendChild(refreshBtn);
 
     // 关闭按钮
     const closeBtn = document.createElement("button");
@@ -238,6 +256,21 @@ function showGallery(widget, node) {
     header.appendChild(closeBtn);
     overlay.appendChild(header);
 
+    const status = document.createElement("div");
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    Object.assign(status.style, {
+        color: "#ddd",
+        fontSize: "13px",
+        marginBottom: "10px",
+        display: "none"
+    });
+    overlay.appendChild(status);
+    const showStatus = (message) => {
+        status.textContent = message;
+        status.style.display = message ? "block" : "none";
+    };
+
     // 图片网格容器
     const container = document.createElement("div");
     Object.assign(container.style, {
@@ -254,17 +287,21 @@ function showGallery(widget, node) {
 
     // 预览列表与支持的格式
     const images = widget.options.values || [];
-    const originalImages = images.slice();
+    let originalImages = images.slice();
     const supportedExtensions = ['.png', '.jpg', '.jpeg', '.bmp', '.webp', '.tiff', '.gif'];
 
-    let sortMode = "default";
+    let sortMode = "mtime_desc";
     let filterText = "";
-    let mtimeCache = {};
+    let mtimeCache = Object.create(null);
+    let imageVersion = Date.now();
+    let refreshVersion = 0;
+    let closed = false;
+    const requestController = new AbortController();
 
     // 通过 /view 请求缩略图尺寸
     const buildImageUrl = (filename, width, height) => {
         const sizeParams = width && height ? `&width=${encodeURIComponent(width)}&height=${encodeURIComponent(height)}` : "";
-        return api.apiURL(`/view?filename=${encodeURIComponent(filename)}&type=input${sizeParams}`);
+        return api.apiURL(`/view?filename=${encodeURIComponent(filename)}&type=input${sizeParams}&v=${encodeURIComponent(imageVersion)}`);
     };
 
     // 交叉观察器用于懒加载
@@ -443,17 +480,25 @@ function showGallery(widget, node) {
     });
 
     const fetchMtimes = async (filenames) => {
-        const res = await fetch(api.apiURL("/funcode/input_files_mtime"), {
+        const res = await api.fetchApi("/funcode/input_files_mtime", {
             method: "POST",
+            cache: "no-store",
+            signal: requestController.signal,
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ filenames })
         });
+        if (!res.ok) throw new Error(`Modification times request failed (${res.status})`);
         const data = await res.json();
-        const mtimes = data && data.mtimes && typeof data.mtimes === "object" ? data.mtimes : {};
+        const mtimes = data?.mtimes;
+        if (!mtimes || typeof mtimes !== "object" || Array.isArray(mtimes)) {
+            throw new Error("Invalid modification times response");
+        }
+        const cache = Object.create(null);
         Object.keys(mtimes).forEach(k => {
             const v = mtimes[k];
-            if (Number.isFinite(Number(v))) mtimeCache[k] = Number(v);
+            if (typeof v === "number" && Number.isFinite(v)) cache[k] = v;
         });
+        return cache;
     };
 
     const getFiltered = () => {
@@ -478,25 +523,67 @@ function showGallery(widget, node) {
         return list;
     };
 
-    const refreshGallery = async () => {
-        const filtered = getFiltered();
-        if (sortMode === "mtime_asc" || sortMode === "mtime_desc") {
-            const missing = filtered.filter(n => mtimeCache[n] === undefined);
-            if (missing.length) {
-                try {
-                    await fetchMtimes(missing);
-                } catch (e) {
-                }
-            }
-        }
-        const list = sortFiles(filtered.slice());
+    const refreshGallery = () => {
+        if (closed) return;
+        const list = sortFiles(getFiltered());
         buildGallery(list);
         updatePreviewSize(previewWidth, previewHeight);
     };
 
-    sortSelect.addEventListener("change", async (e) => {
-        sortMode = e.target.value || "default";
-        await refreshGallery();
+    // 重新读取节点的 INPUT_TYPES，获取 input 目录当前的图片列表。
+    const reloadImages = async () => {
+        if (closed || refreshBtn.disabled) return;
+        refreshBtn.disabled = true;
+        refreshBtn.textContent = "Refreshing…";
+        showStatus("Loading input images…");
+        try {
+            const res = await api.fetchApi("/object_info/LoadImageFunCodeNode", {
+                cache: "no-store",
+                signal: requestController.signal
+            });
+            if (!res.ok) throw new Error(`Image list request failed (${res.status})`);
+            const data = await res.json();
+            if (closed) return;
+            const filenames = data?.LoadImageFunCodeNode?.input?.required?.image?.[0];
+            if (!Array.isArray(filenames) || !filenames.every(name => typeof name === "string")) {
+                throw new Error("Invalid image list response");
+            }
+
+            let mtimes = Object.create(null);
+            let warning = "";
+            if (filenames.length) {
+                try {
+                    mtimes = await fetchMtimes(filenames);
+                } catch (error) {
+                    if (requestController.signal.aborted) return;
+                    console.warn("FunCode gallery: failed to load modification times", error);
+                    warning = "Images refreshed, but modification times could not be loaded. Click Refresh to retry.";
+                }
+            }
+            if (closed) return;
+            originalImages = filenames.slice();
+            widget.options.values = filenames.slice();
+            mtimeCache = mtimes;
+            imageVersion = `${Date.now()}-${++refreshVersion}`;
+            refreshGallery();
+            showStatus(warning || (filenames.length ? "" : "No images in the input directory."));
+        } catch (error) {
+            if (closed || requestController.signal.aborted) return;
+            console.error("FunCode gallery: failed to refresh images", error);
+            showStatus("Could not refresh images. Check the ComfyUI connection and click Refresh to retry.");
+        } finally {
+            if (!closed) {
+                refreshBtn.disabled = false;
+                refreshBtn.textContent = "Refresh";
+            }
+        }
+    };
+
+    refreshBtn.onclick = reloadImages;
+
+    sortSelect.addEventListener("change", (e) => {
+        sortMode = e.target.value || "mtime_desc";
+        refreshGallery();
     });
 
     let filterTimer = null;
@@ -510,6 +597,9 @@ function showGallery(widget, node) {
 
     // 清理事件与观察器
     const cleanup = () => {
+        closed = true;
+        requestController.abort();
+        if (filterTimer) clearTimeout(filterTimer);
         if (document.body.contains(overlay)) document.body.removeChild(overlay);
         document.removeEventListener("keydown", escListener);
         if (observer) observer.disconnect();
@@ -529,6 +619,7 @@ function showGallery(widget, node) {
     refreshGallery();
 
     document.body.appendChild(overlay);
+    reloadImages();
     requestAnimationFrame(() => {
         if (document.body.contains(overlay)) {
             filterInput.focus({ preventScroll: true });
