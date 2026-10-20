@@ -1,5 +1,6 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
+import { VirtualImageGrid } from "./preview_image_grid.js";
 
 app.registerExtension({
     name: "FunCode.LoadImageFunCodeNode",
@@ -62,6 +63,7 @@ function showGallery(widget, node) {
     const maxSize = 1024;
 
     const normalizeSize = (value, fallback) => {
+        if (value === null || value === "") return fallback;
         const n = Number(value);
         if (!Number.isFinite(n)) return fallback;
         return Math.min(maxSize, Math.max(minSize, Math.round(n)));
@@ -213,6 +215,11 @@ function showGallery(widget, node) {
         fontSize: "13px"
     });
 
+    const undoBtn = document.createElement("button");
+    undoBtn.textContent = "Undo Delete";
+    undoBtn.hidden = true;
+    undoBtn.style.cssText = refreshBtn.style.cssText;
+
     const filterInput = document.createElement("input");
     filterInput.type = "text";
     filterInput.placeholder = "Filter";
@@ -237,6 +244,7 @@ function showGallery(widget, node) {
     controls.appendChild(sortSelect);
     controls.appendChild(filterInput);
     controls.appendChild(refreshBtn);
+    controls.appendChild(undoBtn);
 
     // 关闭按钮
     const closeBtn = document.createElement("button");
@@ -273,17 +281,7 @@ function showGallery(widget, node) {
 
     // 图片网格容器
     const container = document.createElement("div");
-    Object.assign(container.style, {
-        flex: "1",
-        overflowY: "auto",
-        display: "grid",
-        alignContent: "start",
-        alignItems: "start",
-        gridAutoRows: "max-content",
-        gridTemplateColumns: `repeat(auto-fill, minmax(${Math.max(120, previewWidth + 20)}px, 1fr))`,
-        gap: "15px",
-        paddingRight: "10px"
-    });
+    container.className = "funcode-gallery-viewport";
 
     // 预览列表与支持的格式
     const images = widget.options.values || [];
@@ -296,6 +294,8 @@ function showGallery(widget, node) {
     let imageVersion = Date.now();
     let refreshVersion = 0;
     let closed = false;
+    let operationPending = false;
+    const deletedImages = [];
     const requestController = new AbortController();
 
     // 通过 /view 请求缩略图尺寸
@@ -304,136 +304,28 @@ function showGallery(widget, node) {
         return api.apiURL(`/view?filename=${encodeURIComponent(filename)}&type=input${sizeParams}&v=${encodeURIComponent(imageVersion)}`);
     };
 
-    // 交叉观察器用于懒加载
-    const imageEntries = [];
-    let observer = null;
-
-    const createObserver = () => {
-        if (observer) observer.disconnect();
-        observer = new IntersectionObserver((entries) => {
-            entries.forEach(entry => {
-                if (!entry.isIntersecting) return;
-                const img = entry.target;
-                if (!img.src) img.src = img.dataset.src || "";
-                observer.unobserve(img);
-            });
-        }, { root: container, rootMargin: "200px" });
-    };
-
-    createObserver();
-
-    const buildGallery = (filenames) => {
-        container.innerHTML = "";
-        imageEntries.length = 0;
-        createObserver();
-        let immediateLoadCount = 0;
-
-        filenames.forEach(filename => {
-        // 跳过非图片文件
-        if (!supportedExtensions.some(ext => filename.toLowerCase().endsWith(ext))) {
-            return;
-        }
-
-        // 单个图片卡片
-        const item = document.createElement("div");
-        Object.assign(item.style, {
-            cursor: "pointer",
-            backgroundColor: "#222",
-            border: "2px solid transparent",
-            borderRadius: "6px",
-            padding: "10px",
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            transition: "all 0.2s"
-        });
-
-        // 选中态高亮
-        if (widget.value === filename) {
-            item.style.borderColor = "#4CAF50";
-            item.style.backgroundColor = "#2e3b2e";
-        }
-
-        item.onmouseenter = () => item.style.backgroundColor = "#333";
-        item.onmouseleave = () => {
-            if (widget.value === filename) item.style.backgroundColor = "#2e3b2e";
-            else item.style.backgroundColor = "#222";
-        };
-
-        // 预览缩略图
-        const img = document.createElement("img");
-        img.loading = "lazy";
-        img.decoding = "async";
-        img.dataset.src = buildImageUrl(filename, previewWidth, previewHeight);
-        img.alt = filename;
-        Object.assign(img.style, {
-            width: `${previewWidth}px`,
-            height: `${previewHeight}px`,
-            objectFit: "contain",
-            marginBottom: "8px",
-            borderRadius: "4px"
-        });
-
-        // 失败时清空避免残影
-        img.onerror = () => {
-            img.src = "";
-            img.alt = "Failed to load";
-        };
-
-        // 先加载一批缩略图，其余交由观察器加载
-        if (immediateLoadCount < 12) {
-            img.src = img.dataset.src || "";
-            immediateLoadCount += 1;
-        } else {
-            observer.observe(img);
-        }
-
-        // 文件名标签
-        const lbl = document.createElement("div");
-        lbl.textContent = filename;
-        lbl.title = filename;
-        Object.assign(lbl.style, {
-            fontSize: "12px",
-            color: "#eee",
-            width: "100%",
-            textAlign: "center",
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis"
-        });
-
-        item.appendChild(img);
-        item.appendChild(lbl);
-
-        // 选中图片并关闭弹窗
-        item.onclick = () => {
+    // 虚拟网格按需创建卡片；滚动时复用仍然可见的卡片。
+    const grid = new VirtualImageGrid(container, {
+        getState: () => ({
+            width: previewWidth, height: previewHeight, selected: widget.value,
+            busy: operationPending || refreshBtn.disabled
+        }),
+        getImageUrl: buildImageUrl,
+        onSelect: (filename) => {
             widget.value = filename;
             if (widget.callback) widget.callback(filename);
-
             node.setDirtyCanvas(true, true);
-
             cleanup();
-        };
-
-        container.appendChild(item);
-        imageEntries.push({ img, filename });
-        });
-    };
-
+        },
+        onAction: (action, filename) => { runFileAction(action, filename); }
+    });
     overlay.appendChild(container);
 
-    // 统一更新尺寸并同步到控件/存储
-    // 统一更新尺寸并刷新已加载缩略图
+    // Resize only mounted cards and preserve the first visible image.
     const updatePreviewSize = (width, height) => {
+        grid.resize();
         previewWidth = normalizeSize(width, defaultWidth);
         previewHeight = normalizeSize(height, defaultHeight);
-        container.style.gridTemplateColumns = `repeat(auto-fill, minmax(${Math.max(120, previewWidth + 20)}px, 1fr))`;
-        imageEntries.forEach(({ img, filename }) => {
-            img.style.width = `${previewWidth}px`;
-            img.style.height = `${previewHeight}px`;
-            img.dataset.src = buildImageUrl(filename, previewWidth, previewHeight);
-            if (img.src) img.src = img.dataset.src || "";
-        });
         widthInput.value = String(previewWidth);
         heightInput.value = String(previewHeight);
         widthRange.value = String(previewWidth);
@@ -443,7 +335,6 @@ function showGallery(widget, node) {
         localStorage.setItem(storageKeyHeight, String(previewHeight));
     };
 
-    // Apply 按钮与输入联动
     const applySize = () => {
         updatePreviewSize(widthInput.value, heightInput.value);
     };
@@ -523,17 +414,125 @@ function showGallery(widget, node) {
         return list;
     };
 
-    const refreshGallery = () => {
+    const refreshGallery = (options) => {
         if (closed) return;
-        const list = sortFiles(getFiltered());
-        buildGallery(list);
-        updatePreviewSize(previewWidth, previewHeight);
+        const list = sortFiles(getFiltered()).filter(filename =>
+            supportedExtensions.some(ext => filename.toLowerCase().endsWith(ext)));
+        grid.setFiles(list, options);
     };
+
+    const setBusy = (busy) => {
+        refreshBtn.disabled = busy;
+        undoBtn.disabled = busy;
+        grid.setBusy(busy);
+    };
+
+    // 同步当前图中引用同一个 input 文件的加载图片节点。
+    const syncImageWidgets = (oldName, newName) => {
+        const nodes = new Set([node, ...(app.graph?._nodes || [])]);
+        for (const current of nodes) {
+            if (!["LoadImageFunCodeNode", "LoadImage"].includes(current.comfyClass)) continue;
+            const image = current.widgets?.find(w => w.name === "image");
+            if (!image) continue;
+            if (Array.isArray(image.options?.values)) {
+                const values = image.options.values.filter(name => name !== oldName);
+                if (newName && !values.includes(newName)) values.push(newName);
+                image.options.values = values.sort();
+            }
+            if (oldName && image.value === oldName) {
+                image.value = newName || "";
+                if (newName && image.callback) {
+                    try { image.callback(newName); }
+                    catch (error) { console.warn("FunCode gallery: image preview callback failed", error); }
+                } else if (!newName) {
+                    current.imgs = [];
+                    current.imageIndex = null;
+                }
+            }
+            current.setDirtyCanvas?.(true, true);
+        }
+    };
+
+    const updateUndoButton = () => {
+        undoBtn.hidden = deletedImages.length === 0;
+        undoBtn.title = deletedImages.length ? `Restore: ${deletedImages[deletedImages.length - 1].filename}` : "";
+    };
+
+    const runFileAction = async (action, filename) => {
+        if (closed || operationPending || refreshBtn.disabled) return;
+        let payload;
+        if (action === "rename") {
+            const dot = filename.lastIndexOf(".");
+            const stem = window.prompt(`Rename image (keep ${filename.slice(dot)}):`, filename.slice(0, dot));
+            if (stem === null) return;
+            if (!stem.trim()) { showStatus("Please enter a filename."); return; }
+            const newName = stem.trim() + filename.slice(dot);
+            if (newName === filename) return;
+            payload = { filename, new_name: newName };
+        } else if (action === "delete") {
+            if (!window.confirm(`Move "${filename}" to recoverable trash?\nSaved workflows referencing this file will need another image.`)) return;
+            payload = { filename };
+        } else if (action === "restore" && deletedImages.length) {
+            payload = { token: deletedImages[deletedImages.length - 1].token };
+        } else {
+            return;
+        }
+
+        operationPending = true;
+        setBusy(true);
+        showStatus("Updating image file…");
+        try {
+            // Do not abort a mutation on close: the server may already have committed it.
+            const res = await api.fetchApi(`/funcode/input_image/${action}`, {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data?.error || `File operation failed (${res.status})`);
+            if (typeof data?.filename !== "string" || (action === "delete" && typeof data.token !== "string")) {
+                throw new Error("Invalid file operation response. Click Refresh to reload the image list.");
+            }
+            let message;
+            if (action === "rename") {
+                originalImages = originalImages.map(name => name === filename ? data.filename : name).sort();
+                mtimeCache[data.filename] = data.mtime ?? mtimeCache[filename] ?? 0;
+                delete mtimeCache[filename];
+                syncImageWidgets(filename, data.filename);
+                message = `Renamed to "${data.filename}". Saved workflows using the old name must be updated.`;
+            } else if (action === "delete") {
+                originalImages = originalImages.filter(name => name !== filename);
+                delete mtimeCache[filename];
+                deletedImages.push({ filename, token: data.token });
+                syncImageWidgets(filename, null);
+                message = `Moved "${filename}" to input/.funcode-trash. Use Undo Delete to restore. Select another image if needed.`;
+            } else {
+                deletedImages.pop();
+                originalImages = [...new Set([...originalImages, data.filename])].sort();
+                mtimeCache[data.filename] = data.mtime ?? 0;
+                syncImageWidgets(null, data.filename);
+                message = `Restored "${data.filename}".`;
+            }
+            if (!closed) {
+                widget.options.values = originalImages.slice();
+                updateUndoButton();
+                refreshGallery({ renamedFrom: action === "rename" ? filename : null, renamedTo: data.filename });
+                showStatus(message);
+            }
+        } catch (error) {
+            console.error("FunCode gallery: file operation failed", error);
+            if (!closed) showStatus(error.message || "File operation failed. Click Refresh to retry.");
+        } finally {
+            operationPending = false;
+            if (!closed) setBusy(false);
+        }
+    };
+
+    undoBtn.onclick = () => runFileAction("restore");
 
     // 重新读取节点的 INPUT_TYPES，获取 input 目录当前的图片列表。
     const reloadImages = async () => {
         if (closed || refreshBtn.disabled) return;
-        refreshBtn.disabled = true;
+        setBusy(true);
         refreshBtn.textContent = "Refreshing…";
         showStatus("Loading input images…");
         try {
@@ -573,7 +572,7 @@ function showGallery(widget, node) {
             showStatus("Could not refresh images. Check the ComfyUI connection and click Refresh to retry.");
         } finally {
             if (!closed) {
-                refreshBtn.disabled = false;
+                setBusy(false);
                 refreshBtn.textContent = "Refresh";
             }
         }
@@ -583,7 +582,7 @@ function showGallery(widget, node) {
 
     sortSelect.addEventListener("change", (e) => {
         sortMode = e.target.value || "mtime_desc";
-        refreshGallery();
+        refreshGallery({ preservePosition: false });
     });
 
     let filterTimer = null;
@@ -591,18 +590,18 @@ function showGallery(widget, node) {
         filterText = e.target.value || "";
         if (filterTimer) clearTimeout(filterTimer);
         filterTimer = setTimeout(() => {
-            refreshGallery();
+            refreshGallery({ preservePosition: false });
         }, 120);
     });
 
-    // 清理事件与观察器
+    // 清理事件、请求、动画帧和尺寸观察器。
     const cleanup = () => {
         closed = true;
         requestController.abort();
         if (filterTimer) clearTimeout(filterTimer);
         if (document.body.contains(overlay)) document.body.removeChild(overlay);
         document.removeEventListener("keydown", escListener);
-        if (observer) observer.disconnect();
+        grid.dispose();
     };
 
     closeBtn.onclick = cleanup;

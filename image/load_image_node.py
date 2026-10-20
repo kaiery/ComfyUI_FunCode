@@ -1,12 +1,54 @@
 import os
+import asyncio
+import logging
 import folder_paths
 from PIL import Image, ImageOps
 import numpy as np
 import torch
+from .input_image_files import (
+    ImageFileError,
+    rename_input_image,
+    delete_input_image,
+    restore_input_image,
+)
 
 try:
     import aiohttp.web
     from server import PromptServer
+
+    async def _gallery_file_operation(request, operation, fields):
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ImageFileError("Expected a JSON object.")
+            result = await asyncio.to_thread(
+                operation, folder_paths.get_input_directory(),
+                *(payload.get(field) for field in fields),
+            )
+            return aiohttp.web.json_response(result)
+        except ImageFileError as error:
+            return aiohttp.web.json_response({"error": str(error)}, status=error.status)
+        except (ValueError, TypeError):
+            return aiohttp.web.json_response({"error": "Invalid request."}, status=400)
+        except FileNotFoundError:
+            return aiohttp.web.json_response({"error": "The image no longer exists. Refresh the gallery."}, status=404)
+        except PermissionError:
+            return aiohttp.web.json_response({"error": "The image is locked or permission was denied."}, status=403)
+        except OSError:
+            logging.exception("FunCode gallery file operation failed")
+            return aiohttp.web.json_response({"error": "File operation failed. Check the ComfyUI log."}, status=500)
+
+    @PromptServer.instance.routes.post("/funcode/input_image/rename")
+    async def funcode_input_image_rename(request):
+        return await _gallery_file_operation(request, rename_input_image, ("filename", "new_name"))
+
+    @PromptServer.instance.routes.post("/funcode/input_image/delete")
+    async def funcode_input_image_delete(request):
+        return await _gallery_file_operation(request, delete_input_image, ("filename",))
+
+    @PromptServer.instance.routes.post("/funcode/input_image/restore")
+    async def funcode_input_image_restore(request):
+        return await _gallery_file_operation(request, restore_input_image, ("token",))
 
     @PromptServer.instance.routes.post("/funcode/input_files_mtime")
     async def funcode_input_files_mtime(request):
