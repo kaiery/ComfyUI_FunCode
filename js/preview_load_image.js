@@ -262,6 +262,20 @@ function showGallery(widget, node) {
     header.appendChild(title);
     header.appendChild(controls);
     header.appendChild(closeBtn);
+    const navigation = document.createElement("nav");
+    navigation.className = "funcode-gallery-navigation";
+    navigation.setAttribute("aria-label", "Input directory navigation");
+    Object.assign(navigation.style, { flexBasis: "100%", display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" });
+    const upBtn = document.createElement("button");
+    upBtn.textContent = "Up";
+    upBtn.title = "Return to the parent directory";
+    upBtn.style.cssText = refreshBtn.style.cssText;
+    const breadcrumbs = document.createElement("div");
+    breadcrumbs.className = "funcode-gallery-breadcrumbs";
+    Object.assign(breadcrumbs.style, { display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" });
+    navigation.appendChild(upBtn);
+    navigation.appendChild(breadcrumbs);
+    header.appendChild(navigation);
     overlay.appendChild(header);
 
     const status = document.createElement("div");
@@ -284,8 +298,11 @@ function showGallery(widget, node) {
     container.className = "funcode-gallery-viewport";
 
     // 预览列表与支持的格式
+    const directoryOf = path => path.slice(0, Math.max(0, path.lastIndexOf("/")));
     const images = widget.options.values || [];
-    let originalImages = images.slice();
+    let currentDirectory = "";
+    let originalImages = images.filter(filename => directoryOf(filename) === "");
+    let directories = [];
     const supportedExtensions = ['.png', '.jpg', '.jpeg', '.bmp', '.webp', '.tiff', '.gif'];
 
     let sortMode = "mtime_desc";
@@ -301,7 +318,9 @@ function showGallery(widget, node) {
     // 通过 /view 请求缩略图尺寸
     const buildImageUrl = (filename, width, height) => {
         const sizeParams = width && height ? `&width=${encodeURIComponent(width)}&height=${encodeURIComponent(height)}` : "";
-        return api.apiURL(`/view?filename=${encodeURIComponent(filename)}&type=input${sizeParams}&v=${encodeURIComponent(imageVersion)}`);
+        const basename = filename.slice(filename.lastIndexOf("/") + 1);
+        const subfolder = directoryOf(filename);
+        return api.apiURL(`/view?filename=${encodeURIComponent(basename)}&subfolder=${encodeURIComponent(subfolder)}&type=input${sizeParams}&v=${encodeURIComponent(imageVersion)}`);
     };
 
     // 虚拟网格按需创建卡片；滚动时复用仍然可见的卡片。
@@ -317,7 +336,8 @@ function showGallery(widget, node) {
             node.setDirtyCanvas(true, true);
             cleanup();
         },
-        onAction: (action, filename) => { runFileAction(action, filename); }
+        onAction: (action, filename) => { runFileAction(action, filename); },
+        onOpenDirectory: directory => { reloadImages(directory, false); }
     });
     overlay.appendChild(container);
 
@@ -370,32 +390,10 @@ function showGallery(widget, node) {
         updatePreviewSize(w, h);
     });
 
-    const fetchMtimes = async (filenames) => {
-        const res = await api.fetchApi("/funcode/input_files_mtime", {
-            method: "POST",
-            cache: "no-store",
-            signal: requestController.signal,
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ filenames })
-        });
-        if (!res.ok) throw new Error(`Modification times request failed (${res.status})`);
-        const data = await res.json();
-        const mtimes = data?.mtimes;
-        if (!mtimes || typeof mtimes !== "object" || Array.isArray(mtimes)) {
-            throw new Error("Invalid modification times response");
-        }
-        const cache = Object.create(null);
-        Object.keys(mtimes).forEach(k => {
-            const v = mtimes[k];
-            if (typeof v === "number" && Number.isFinite(v)) cache[k] = v;
-        });
-        return cache;
-    };
-
     const getFiltered = () => {
         const q = (filterText || "").trim().toLowerCase();
         if (!q) return originalImages.slice();
-        return originalImages.filter(n => String(n).toLowerCase().includes(q));
+        return originalImages.filter(n => n.slice(n.lastIndexOf("/") + 1).toLowerCase().includes(q));
     };
 
     const sortFiles = (list) => {
@@ -418,12 +416,45 @@ function showGallery(widget, node) {
         if (closed) return;
         const list = sortFiles(getFiltered()).filter(filename =>
             supportedExtensions.some(ext => filename.toLowerCase().endsWith(ext)));
-        grid.setFiles(list, options);
+        const query = filterText.trim().toLowerCase();
+        const folders = directories.filter(path => path.slice(path.lastIndexOf("/") + 1).toLowerCase().includes(query));
+        grid.setFiles([...folders.map(path => `${path}/`), ...list], options);
+    };
+
+    const updateDirectoryOptions = () => {
+        const values = Array.isArray(widget.options.values) ? widget.options.values : [];
+        widget.options.values = [...new Set([
+            ...values.filter(path => directoryOf(path) !== currentDirectory), ...originalImages
+        ])].sort();
+    };
+
+    const renderNavigation = () => {
+        breadcrumbs.innerHTML = "";
+        const parts = currentDirectory ? currentDirectory.split("/") : [];
+        for (let index = 0; index <= parts.length; index++) {
+            if (index) {
+                const separator = document.createElement("span");
+                separator.textContent = "/";
+                breadcrumbs.appendChild(separator);
+            }
+            const button = document.createElement("button");
+            const path = parts.slice(0, index).join("/");
+            button.textContent = index ? parts[index - 1] : "input";
+            button.title = path || "input";
+            button.dataset.directory = path;
+            button.style.cssText = refreshBtn.style.cssText;
+            if (index === parts.length) button.setAttribute("aria-current", "location");
+            button.onclick = () => reloadImages(path, false);
+            breadcrumbs.appendChild(button);
+        }
+        upBtn.disabled = !currentDirectory || refreshBtn.disabled;
     };
 
     const setBusy = (busy) => {
         refreshBtn.disabled = busy;
         undoBtn.disabled = busy;
+        upBtn.disabled = busy || !currentDirectory;
+        Array.from(breadcrumbs.children).forEach(button => { if (button.tagName.toLowerCase() === "button") button.disabled = busy; });
         grid.setBusy(busy);
     };
 
@@ -462,12 +493,13 @@ function showGallery(widget, node) {
         if (closed || operationPending || refreshBtn.disabled) return;
         let payload;
         if (action === "rename") {
-            const dot = filename.lastIndexOf(".");
-            const stem = window.prompt(`Rename image (keep ${filename.slice(dot)}):`, filename.slice(0, dot));
+            const basename = filename.slice(filename.lastIndexOf("/") + 1);
+            const dot = basename.lastIndexOf(".");
+            const stem = window.prompt(`Rename image (keep ${basename.slice(dot)}):`, basename.slice(0, dot));
             if (stem === null) return;
             if (!stem.trim()) { showStatus("Please enter a filename."); return; }
-            const newName = stem.trim() + filename.slice(dot);
-            if (newName === filename) return;
+            const newName = stem.trim() + basename.slice(dot);
+            if (newName === basename) return;
             payload = { filename, new_name: newName };
         } else if (action === "delete") {
             if (!window.confirm(`Move "${filename}" to recoverable trash?\nSaved workflows referencing this file will need another image.`)) return;
@@ -507,13 +539,15 @@ function showGallery(widget, node) {
                 message = `Moved "${filename}" to input/.funcode-trash. Use Undo Delete to restore. Select another image if needed.`;
             } else {
                 deletedImages.pop();
-                originalImages = [...new Set([...originalImages, data.filename])].sort();
-                mtimeCache[data.filename] = data.mtime ?? 0;
+                if (directoryOf(data.filename) === currentDirectory) {
+                    originalImages = [...new Set([...originalImages, data.filename])].sort();
+                    mtimeCache[data.filename] = data.mtime ?? 0;
+                }
                 syncImageWidgets(null, data.filename);
                 message = `Restored "${data.filename}".`;
             }
             if (!closed) {
-                widget.options.values = originalImages.slice();
+                updateDirectoryOptions();
                 updateUndoButton();
                 refreshGallery({ renamedFrom: action === "rename" ? filename : null, renamedTo: data.filename });
                 showStatus(message);
@@ -529,47 +563,55 @@ function showGallery(widget, node) {
 
     undoBtn.onclick = () => runFileAction("restore");
 
-    // 重新读取节点的 INPUT_TYPES，获取 input 目录当前的图片列表。
-    const reloadImages = async () => {
+    // 每次只读取当前目录的一层，同时获取修改时间，不递归扫描整个 input。
+    const reloadImages = async (directory = currentDirectory, preservePosition = true) => {
         if (closed || refreshBtn.disabled) return;
         setBusy(true);
         refreshBtn.textContent = "Refreshing…";
         showStatus("Loading input images…");
         try {
-            const res = await api.fetchApi("/object_info/LoadImageFunCodeNode", {
+            const res = await api.fetchApi(`/funcode/input_images?directory=${encodeURIComponent(directory)}`, {
                 cache: "no-store",
                 signal: requestController.signal
             });
-            if (!res.ok) throw new Error(`Image list request failed (${res.status})`);
             const data = await res.json();
+            if (!res.ok) throw new Error(data?.error || `Image list request failed (${res.status})`);
             if (closed) return;
-            const filenames = data?.LoadImageFunCodeNode?.input?.required?.image?.[0];
-            if (!Array.isArray(filenames) || !filenames.every(name => typeof name === "string")) {
+            const filenames = data?.files;
+            const isChild = name => typeof name === "string" && name && !name.endsWith("/") && directoryOf(name) === directory;
+            if (data?.directory !== directory || !Array.isArray(filenames) || !filenames.every(isChild) ||
+                !Array.isArray(data.directories) || !data.directories.every(isChild)) {
                 throw new Error("Invalid image list response");
             }
 
-            let mtimes = Object.create(null);
+            const mtimes = Object.create(null);
             let warning = "";
-            if (filenames.length) {
-                try {
-                    mtimes = await fetchMtimes(filenames);
-                } catch (error) {
-                    if (requestController.signal.aborted) return;
-                    console.warn("FunCode gallery: failed to load modification times", error);
-                    warning = "Images refreshed, but modification times could not be loaded. Click Refresh to retry.";
+            if (data.mtimes && typeof data.mtimes === "object" && !Array.isArray(data.mtimes)) {
+                for (const name of filenames) {
+                    if (Number.isFinite(data.mtimes[name])) mtimes[name] = data.mtimes[name];
                 }
+            } else {
+                warning = "Images refreshed, but modification times could not be loaded. Click Refresh to retry.";
             }
             if (closed) return;
+            if (directory !== currentDirectory) {
+                filterText = "";
+                filterInput.value = "";
+                if (filterTimer) clearTimeout(filterTimer);
+            }
+            currentDirectory = directory;
+            directories = data.directories.slice().sort((a, b) => a.localeCompare(b));
             originalImages = filenames.slice();
-            widget.options.values = filenames.slice();
+            updateDirectoryOptions();
             mtimeCache = mtimes;
             imageVersion = `${Date.now()}-${++refreshVersion}`;
-            refreshGallery();
-            showStatus(warning || (filenames.length ? "" : "No images in the input directory."));
+            renderNavigation();
+            refreshGallery({ preservePosition });
+            showStatus(warning || (filenames.length || directories.length ? "" : "No images or folders in this directory."));
         } catch (error) {
             if (closed || requestController.signal.aborted) return;
             console.error("FunCode gallery: failed to refresh images", error);
-            showStatus("Could not refresh images. Check the ComfyUI connection and click Refresh to retry.");
+            showStatus(`Could not refresh images. ${error.message || "Check the ComfyUI connection and retry."}`);
         } finally {
             if (!closed) {
                 setBusy(false);
@@ -578,7 +620,8 @@ function showGallery(widget, node) {
         }
     };
 
-    refreshBtn.onclick = reloadImages;
+    refreshBtn.onclick = () => reloadImages();
+    upBtn.onclick = () => reloadImages(directoryOf(currentDirectory), false);
 
     sortSelect.addEventListener("change", (e) => {
         sortMode = e.target.value || "mtime_desc";
@@ -613,6 +656,7 @@ function showGallery(widget, node) {
     };
     document.addEventListener("keydown", escListener);
 
+    renderNavigation();
     updatePreviewSize(previewWidth, previewHeight);
 
     refreshGallery();

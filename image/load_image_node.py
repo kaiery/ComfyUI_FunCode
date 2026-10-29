@@ -10,6 +10,8 @@ from .input_image_files import (
     rename_input_image,
     delete_input_image,
     restore_input_image,
+    list_input_directory,
+    list_input_image_paths,
 )
 
 try:
@@ -49,6 +51,20 @@ try:
     @PromptServer.instance.routes.post("/funcode/input_image/restore")
     async def funcode_input_image_restore(request):
         return await _gallery_file_operation(request, restore_input_image, ("token",))
+
+    @PromptServer.instance.routes.get("/funcode/input_images")
+    async def funcode_input_images(request):
+        try:
+            result = await asyncio.to_thread(
+                list_input_directory, folder_paths.get_input_directory(), request.query.get("directory", ""),
+            )
+            return aiohttp.web.json_response(result, headers={"Cache-Control": "no-store"})
+        except ImageFileError as error:
+            return aiohttp.web.json_response({"error": str(error)}, status=error.status)
+        except PermissionError:
+            return aiohttp.web.json_response({"error": "Permission to read this directory was denied."}, status=403)
+        except OSError:
+            return aiohttp.web.json_response({"error": "Could not read this directory. Refresh or return to its parent."}, status=500)
 
     @PromptServer.instance.routes.post("/funcode/input_files_mtime")
     async def funcode_input_files_mtime(request):
@@ -94,14 +110,8 @@ except Exception:
 class LoadImageFunCodeNode:
     @classmethod
     def INPUT_TYPES(s):
-        # 输入目录内的图片列表
-        input_dir = folder_paths.get_input_directory()
-        # 过滤子目录，避免非法项
-        files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
-        
-        # 仅保留支持的图片格式
-        valid_extensions = {'.png', '.jpg', '.jpeg', '.bmp', '.webp', '.tiff', '.gif'}
-        files = [f for f in files if os.path.splitext(f)[1].lower() in valid_extensions]
+        # 包含子目录的相对路径，使保存的工作流重新打开后仍能选择原文件。
+        files = list_input_image_paths(folder_paths.get_input_directory())
         
         # 只暴露图片选择，不在节点面板显示预览尺寸
         return {"required":

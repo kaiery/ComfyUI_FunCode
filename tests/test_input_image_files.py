@@ -30,6 +30,65 @@ class InputImageFileTests(unittest.TestCase):
         self.assertFalse(self.source.exists())
         self.assertEqual((self.root / "renamed.png").read_bytes(), b"image-content")
 
+    def test_listing_reads_one_level_and_excludes_private_trash(self):
+        nested = self.root / "目录" / "第二层"
+        nested.mkdir(parents=True)
+        (nested.parent / "same.png").write_bytes(b"nested")
+        (nested / "deep.png").write_bytes(b"deep")
+        (self.root / "notes.txt").write_text("not an image")
+        (self.root / files.TRASH_DIRECTORY).mkdir()
+        (self.root / files.TRASH_DIRECTORY / "hidden.png").write_bytes(b"private")
+        with patch.object(files.os, "scandir", wraps=os.scandir) as scan:
+            root = files.list_input_directory(self.root)
+            self.assertEqual(scan.call_count, 1)
+        self.assertEqual(root["directories"], ["目录"])
+        self.assertEqual(root["files"], ["original.png"])
+        listing = files.list_input_directory(self.root, "目录")
+        self.assertEqual(listing["directory"], "目录")
+        self.assertEqual(listing["directories"], ["目录/第二层"])
+        self.assertEqual(listing["files"], ["目录/same.png"])
+        self.assertIn("目录/same.png", listing["mtimes"])
+        self.assertEqual(files.list_input_image_paths(self.root), ["original.png", "目录/same.png", "目录/第二层/deep.png"])
+
+    def test_nested_rename_delete_restore_keep_relative_path_and_other_namesakes(self):
+        folder = self.root / "album" / "child"
+        folder.mkdir(parents=True)
+        (folder / "original.png").write_bytes(b"nested-content")
+        result = files.rename_input_image(self.root, "album/child/original.png", "renamed.png")
+        self.assertEqual(result["filename"], "album/child/renamed.png")
+        self.assertEqual(self.source.read_bytes(), b"image-content")
+        deleted = files.delete_input_image(self.root, result["filename"])
+        entry = self.root / files.TRASH_DIRECTORY / deleted["token"]
+        self.assertEqual((entry / "renamed.png").read_bytes(), b"nested-content")
+        metadata = json.loads((entry / "metadata.json").read_text(encoding="utf-8"))
+        self.assertEqual(metadata["filename"], "album/child/renamed.png")
+        restored = files.restore_input_image(self.root, deleted["token"])
+        self.assertEqual(restored["filename"], "album/child/renamed.png")
+        self.assertEqual((folder / "renamed.png").read_bytes(), b"nested-content")
+        self.assertEqual(self.source.read_bytes(), b"image-content")
+
+    def test_directory_traversal_and_private_trash_are_rejected(self):
+        for directory in [None, [], "../outside", "album/../outside", "album\\child", "/absolute", "C:/input", "album//child", "album/.", ".funcode-trash", "album/.funcode-trash"]:
+            with self.subTest(directory=directory):
+                with self.assertRaises(files.ImageFileError):
+                    files.list_input_directory(self.root, directory)
+        with self.assertRaises(files.ImageFileError) as raised:
+            files.list_input_directory(self.root, "missing")
+        self.assertEqual(raised.exception.status, 404)
+
+    def test_restoring_missing_parent_keeps_trash_until_parent_is_recreated(self):
+        folder = self.root / "album"
+        folder.mkdir()
+        (folder / "photo.png").write_bytes(b"nested")
+        deleted = files.delete_input_image(self.root, "album/photo.png")
+        folder.rmdir()
+        with self.assertRaises(files.ImageFileError) as raised:
+            files.restore_input_image(self.root, deleted["token"])
+        self.assertEqual(raised.exception.status, 404)
+        folder.mkdir()
+        files.restore_input_image(self.root, deleted["token"])
+        self.assertEqual((folder / "photo.png").read_bytes(), b"nested")
+
     def test_rename_never_overwrites_existing_file(self):
         target = self.root / "existing.png"
         target.write_bytes(b"keep-this")
@@ -161,6 +220,7 @@ class GalleryRouteTests(unittest.IsolatedAsyncioTestCase):
         module = importlib.util.module_from_spec(spec)
         with patch.dict(sys.modules, dependencies):
             spec.loader.exec_module(module)
+        self.module = module
         app = web.Application()
         app.add_routes(routes)
         self.client = TestClient(TestServer(app))
@@ -194,6 +254,27 @@ class GalleryRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.source.read_bytes(), b"image-content")
         response = await self.client.post("/funcode/input_image/delete", data="broken-json", headers={"Content-Type": "application/json"})
         self.assertEqual(response.status, 400)
+
+    async def test_http_directory_listing_and_nested_mutations(self):
+        folder = self.root / "album" / "child"
+        folder.mkdir(parents=True)
+        (folder / "original.png").write_bytes(b"nested")
+        root = await self.client.get("/funcode/input_images")
+        self.assertEqual(root.status, 200)
+        self.assertEqual((await root.json())["directories"], ["album"])
+        nested = await self.client.get("/funcode/input_images", params={"directory": "album/child"})
+        self.assertEqual(nested.status, 200)
+        self.assertEqual((await nested.json())["files"], ["album/child/original.png"])
+        self.assertEqual(self.module.LoadImageFunCodeNode.INPUT_TYPES()["required"]["image"][0], ["album/child/original.png", "original.png"])
+        renamed = await self.client.post("/funcode/input_image/rename", json={"filename": "album/child/original.png", "new_name": "renamed.png"})
+        self.assertEqual((await renamed.json())["filename"], "album/child/renamed.png")
+        deleted = await self.client.post("/funcode/input_image/delete", json={"filename": "album/child/renamed.png"})
+        restored = await self.client.post("/funcode/input_image/restore", json={"token": (await deleted.json())["token"]})
+        self.assertEqual((await restored.json())["filename"], "album/child/renamed.png")
+        self.assertEqual(self.source.read_bytes(), b"image-content")
+        for directory, expected in [("../outside", 400), (".funcode-trash", 403), ("missing", 404)]:
+            response = await self.client.get("/funcode/input_images", params={"directory": directory})
+            self.assertEqual(response.status, expected)
 
 
 if __name__ == "__main__":

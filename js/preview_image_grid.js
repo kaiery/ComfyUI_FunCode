@@ -1,6 +1,6 @@
 // Only visible rows and a small buffer own DOM nodes and image requests.
 export class VirtualImageGrid {
-    constructor(viewport, { getState, getImageUrl, onSelect, onAction }) {
+    constructor(viewport, { getState, getImageUrl, onSelect, onAction, onOpenDirectory }) {
         this.viewport = viewport;
         this.getState = getState;
         this.getImageUrl = getImageUrl;
@@ -46,12 +46,18 @@ export class VirtualImageGrid {
                 if (!button.disabled && !this.getState().busy) onAction(button.dataset.action, item.dataset.filename);
                 return;
             }
-            if (!this.getState().busy) onSelect(item.dataset.filename);
+            if (!this.getState().busy) {
+                if (item.dataset.directory !== undefined) onOpenDirectory(item.dataset.directory);
+                else onSelect(item.dataset.filename);
+            }
         });
         this.content.addEventListener("keydown", (event) => {
             if (event.target.classList.contains("funcode-gallery-card") && ["Enter", " "].includes(event.key)) {
                 event.preventDefault();
-                if (!this.getState().busy) onSelect(event.target.dataset.filename);
+                if (!this.getState().busy) {
+                    if (event.target.dataset.directory !== undefined) onOpenDirectory(event.target.dataset.directory);
+                    else onSelect(event.target.dataset.filename);
+                }
             }
         });
     }
@@ -95,18 +101,26 @@ export class VirtualImageGrid {
     }
 
     createCard(filename) {
+        const isDirectory = filename.endsWith("/");
+        const path = isDirectory ? filename.slice(0, -1) : filename;
+        const basename = path.slice(path.lastIndexOf("/") + 1);
         const item = document.createElement("div");
         item.className = "funcode-gallery-card";
         item.dataset.filename = filename;
         item.tabIndex = 0;
         item.setAttribute("role", "group");
-        item.setAttribute("aria-label", filename);
+        item.setAttribute("aria-label", isDirectory ? `Open folder: ${path}` : filename);
+        if (isDirectory) item.dataset.directory = path;
         Object.assign(item.style, {
             position: "absolute", boxSizing: "border-box", cursor: "pointer",
             border: "2px solid transparent", borderRadius: "6px", padding: "10px",
             display: "flex", flexDirection: "column", alignItems: "center", overflow: "hidden"
         });
-        const img = document.createElement("img");
+        const img = document.createElement(isDirectory ? "div" : "img");
+        if (isDirectory) {
+            img.textContent = "📁";
+            Object.assign(img.style, { display: "flex", alignItems: "center", justifyContent: "center", fontSize: "64px" });
+        }
         img.loading = "lazy";
         img.decoding = "async";
         img.alt = filename;
@@ -118,7 +132,7 @@ export class VirtualImageGrid {
             img.alt = "Failed to load";
         };
         const label = document.createElement("div");
-        label.textContent = filename;
+        label.textContent = basename;
         label.title = filename;
         Object.assign(label.style, {
             fontSize: "12px", height: "18px", lineHeight: "18px", flexShrink: "0",
@@ -130,7 +144,7 @@ export class VirtualImageGrid {
         Object.assign(actions.style, {
             position: "absolute", top: "4px", right: "4px", display: "flex", gap: "4px"
         });
-        for (const [action, text] of [["rename", "Rename"], ["delete", "Delete"]]) {
+        for (const [action, text] of (isDirectory ? [] : [["rename", "Rename"], ["delete", "Delete"]])) {
             const button = document.createElement("button");
             button.type = "button";
             button.dataset.action = action;
@@ -204,11 +218,13 @@ export class VirtualImageGrid {
             card.item.classList.toggle("is-selected", selected === filename);
             card.img.style.width = `${width}px`;
             card.img.style.height = `${height}px`;
-            const url = this.getImageUrl(filename, width, height);
-            if (card.img.dataset.src !== url) {
-                card.img.alt = filename;
-                card.img.dataset.src = url;
-                card.img.src = url;
+            if (!filename.endsWith("/")) {
+                const url = this.getImageUrl(filename, width, height);
+                if (card.img.dataset.src !== url) {
+                    card.img.alt = filename;
+                    card.img.dataset.src = url;
+                    card.img.src = url;
+                }
             }
             card.buttons.forEach(button => { button.disabled = busy; });
         }

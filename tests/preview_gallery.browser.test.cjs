@@ -14,11 +14,15 @@ const baseline = process.env.GALLERY_BASELINE_REF
   ? execFileSync("git", ["show", `${process.env.GALLERY_BASELINE_REF}:js/preview_load_image.js`], { cwd: root, encoding: "utf8" })
   : null;
 
-async function fixture(browser, count, legacy = false, { mtimeDelay = 0 } = {}) {
+async function fixture(browser, count, legacy = false, { mtimeDelay = 0, nested = false } = {}) {
   const state = {
     filenames: Array.from({ length: count }, (_, index) => `image-${String(index).padStart(5, "0")}.png`),
-    mtimes: {}, images: 0, operations: 0,
+    mtimes: {}, images: 0, operations: 0, directories: [], imagePaths: [],
   };
+  if (nested) {
+    state.directories = ["album", "album/deep", "empty"];
+    state.filenames.push("album/image-00000.png", "album/deep/细节 #.png");
+  }
   state.filenames.forEach((name, index) => { state.mtimes[name] = index; });
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
@@ -57,8 +61,23 @@ async function fixture(browser, count, legacy = false, { mtimeDelay = 0 } = {}) 
       if (mtimeDelay) await new Promise(resolve => setTimeout(resolve, mtimeDelay));
       return send({ mtimes: state.mtimes });
     }
+    if (url.pathname === "/funcode/input_images") {
+      if (mtimeDelay) await new Promise(resolve => setTimeout(resolve, mtimeDelay));
+      const directory = url.searchParams.get("directory") || "";
+      if (directory && !state.directories.includes(directory)) return send({ error: "Directory not found." }, "application/json", 404);
+      const parentOf = name => name.slice(0, Math.max(0, name.lastIndexOf("/")));
+      return send({
+        directory, files: state.filenames.filter(name => parentOf(name) === directory),
+        directories: state.directories.filter(name => parentOf(name) === directory), mtimes: state.mtimes,
+      });
+    }
     if (url.pathname === "/view") {
       state.images++;
+      const directory = url.searchParams.get("subfolder");
+      const filename = url.searchParams.get("filename");
+      const relative = directory ? `${directory}/${filename}` : filename;
+      state.imagePaths.push(relative);
+      if (!state.filenames.includes(relative) || filename.includes("/")) return send("Missing image", "text/plain", 404);
       return send('<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="#456e8c"/><circle cx="50" cy="50" r="25" fill="#a4cfbc"/></svg>', "image/svg+xml");
     }
     if (url.pathname.startsWith("/funcode/input_image/")) {
@@ -67,11 +86,13 @@ async function fixture(browser, count, legacy = false, { mtimeDelay = 0 } = {}) 
       const payload = JSON.parse(body);
       state.operations++;
       if (url.pathname.endsWith("/rename")) {
-        if (state.filenames.includes(payload.new_name)) return send({ error: "A file with that name already exists." }, "application/json", 409);
-        state.filenames = state.filenames.map(name => name === payload.filename ? payload.new_name : name).sort();
-        state.mtimes[payload.new_name] = state.mtimes[payload.filename];
+        const parent = payload.filename.slice(0, Math.max(0, payload.filename.lastIndexOf("/")));
+        const renamed = parent ? `${parent}/${payload.new_name}` : payload.new_name;
+        if (state.filenames.includes(renamed)) return send({ error: "A file with that name already exists." }, "application/json", 409);
+        state.filenames = state.filenames.map(name => name === payload.filename ? renamed : name).sort();
+        state.mtimes[renamed] = state.mtimes[payload.filename];
         delete state.mtimes[payload.filename];
-        return send({ filename: payload.new_name, mtime: state.mtimes[payload.new_name] });
+        return send({ filename: renamed, mtime: state.mtimes[renamed] });
       }
       if (url.pathname.endsWith("/delete")) {
         state.filenames = state.filenames.filter(name => name !== payload.filename);
@@ -95,7 +116,7 @@ async function fixture(browser, count, legacy = false, { mtimeDelay = 0 } = {}) 
   try {
     await page.goto(`http://127.0.0.1:${server.address().port}/`);
     await page.waitForFunction(count => window.fixture?.widget.options.values.length === count &&
-      [...document.querySelectorAll("button")].some(button => button.textContent === "Refresh" && !button.disabled), count, { timeout: 8000 });
+      [...document.querySelectorAll("button")].some(button => button.textContent === "Refresh" && !button.disabled), state.filenames.length, { timeout: 8000 });
   } catch (error) {
     console.error("Browser fixture failed:", { count, legacy, errors, logs, body: await page.locator("body").innerText() });
     await context.close();
@@ -126,6 +147,54 @@ test("real Chromium: bounded cards, scroll/resize anchors and file controls", { 
     ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE } : {}),
   });
   t.after(() => browser.close());
+
+  await t.test("browse directories, preview nested namesakes, mutate and undo across directories", async () => {
+    const ui = await fixture(browser, 2, false, { nested: true });
+    const { page } = ui;
+    try {
+      assert.equal(await page.locator(".funcode-gallery-card").first().getAttribute("data-directory"), "album");
+      await page.locator('.funcode-gallery-card[data-directory="album"]').click();
+      await page.waitForSelector('.funcode-gallery-card[data-filename="album/image-00000.png"]');
+      assert.equal(await page.locator(".funcode-gallery-viewport").count(), 1);
+      const nested = page.locator('.funcode-gallery-card[data-filename="album/image-00000.png"]');
+      await page.waitForFunction(() => document.querySelector('[data-filename="album/image-00000.png"] img')?.naturalWidth > 0);
+      assert.ok(ui.state.imagePaths.includes("album/image-00000.png"));
+      await page.evaluate(() => { window.fixture.widget.value = "album/image-00000.png"; });
+      await nested.hover();
+      page.once("dialog", dialog => dialog.accept("renamed"));
+      await nested.getByRole("button", { name: "Rename: album/image-00000.png", exact: true }).click();
+      await page.waitForSelector('[data-filename="album/renamed.png"]');
+      assert.equal(await page.evaluate(() => window.fixture.widget.value), "album/renamed.png");
+      assert.equal(await page.evaluate(() => window.fixture.otherWidget.value), "image-00000.png");
+      const renamed = page.locator('[data-filename="album/renamed.png"]');
+      await renamed.hover();
+      page.once("dialog", dialog => dialog.accept());
+      await renamed.getByRole("button", { name: "Delete: album/renamed.png", exact: true }).click();
+      await page.waitForFunction(() => window.fixture.widget.value === "");
+      await page.getByRole("button", { name: "Up", exact: true }).click();
+      await page.waitForSelector('.funcode-gallery-card[data-directory="album"]');
+      await page.getByRole("button", { name: "Undo Delete", exact: true }).click();
+      await page.waitForFunction(() => document.querySelector("button[aria-current='location']")?.textContent === "input" &&
+        [...document.querySelectorAll("button")].some(button => button.textContent === "Undo Delete" && button.hidden));
+      assert.equal(await page.locator('[data-filename="album/renamed.png"]').count(), 0);
+      assert.ok(await page.evaluate(() => window.fixture.widget.options.values.includes("album/renamed.png")));
+      await page.locator('.funcode-gallery-card[data-directory="empty"]').click();
+      await page.waitForFunction(() => document.querySelector("[role=status]").textContent.includes("No images or folders"));
+      assert.equal(await page.locator(".funcode-gallery-card").count(), 0);
+      await page.getByRole("navigation").getByRole("button", { name: "input", exact: true }).click();
+      await page.locator('.funcode-gallery-card[data-directory="album"]').click();
+      await page.waitForSelector('.funcode-gallery-card[data-directory="album/deep"]');
+      if (process.env.GALLERY_DIRECTORY_SCREENSHOT) await page.screenshot({ path: process.env.GALLERY_DIRECTORY_SCREENSHOT });
+      await page.locator('.funcode-gallery-card[data-directory="album/deep"]').click();
+      const deep = page.locator('.funcode-gallery-card[data-filename="album/deep/细节 #.png"]');
+      await deep.waitFor();
+      await page.waitForFunction(() => document.querySelector('[data-filename="album/deep/细节 #.png"] img')?.naturalWidth > 0);
+      await deep.locator("img").click();
+      assert.equal(await page.evaluate(() => window.fixture.widget.value), "album/deep/细节 #.png");
+      assert.equal(await page.locator(".funcode-gallery-viewport").count(), 0);
+      assert.deepEqual(ui.errors, []);
+    } finally { await ui.close(); }
+  });
 
   await t.test("cached filenames and delayed modification times never send a newly opened gallery to the bottom", async () => {
     const ui = await fixture(browser, 1000, false, { mtimeDelay: 100 });

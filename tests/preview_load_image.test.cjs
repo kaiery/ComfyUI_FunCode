@@ -66,6 +66,7 @@ async function openGallery(options = {}) {
   const requests = [];
   const server = {
     filenames: ["a.png", "z.png"],
+    directories: [],
     mtimes: { "a.png": 10, "z.png": 20 },
     listStatus: 200,
     mtimeStatus: 200,
@@ -95,16 +96,19 @@ async function openGallery(options = {}) {
       async fetchApi(url, options) {
         requests.push({ url, options });
         if (server.gate) await server.gate;
-        if (url === "/funcode/input_files_mtime" && server.mtimeGate) await server.mtimeGate;
-        const isList = url.startsWith("/object_info/");
+        const isList = url.startsWith("/funcode/input_images?");
+        if (isList && server.mtimeGate) await server.mtimeGate;
         if (url.startsWith("/funcode/input_image/")) {
           const payload = JSON.parse(options.body);
           let data;
           if (server.actionStatus !== 200) {
             data = { error: "A file with that name already exists." };
           } else if (url.endsWith("/rename")) {
-            server.filenames = server.filenames.map(name => name === payload.filename ? payload.new_name : name);
-            data = { filename: payload.new_name, mtime: server.mtimes[payload.filename] };
+            const parent = payload.filename.slice(0, Math.max(0, payload.filename.lastIndexOf("/")));
+            const renamed = parent ? `${parent}/${payload.new_name}` : payload.new_name;
+            server.filenames = server.filenames.map(name => name === payload.filename ? renamed : name);
+            server.mtimes[renamed] = server.mtimes[payload.filename];
+            data = { filename: renamed, mtime: server.mtimes[renamed] };
           } else if (url.endsWith("/delete")) {
             server.filenames = server.filenames.filter(name => name !== payload.filename);
             server.deleted = payload.filename;
@@ -115,14 +119,20 @@ async function openGallery(options = {}) {
           }
           return { ok: server.actionStatus === 200, status: server.actionStatus, async json() { return data; } };
         }
-        const status = isList ? server.listStatus : server.mtimeStatus;
+        assert.ok(isList, `Unexpected request: ${url}`);
+        const directory = new URL(url, "http://localhost").searchParams.get("directory");
+        const parentOf = name => name.slice(0, Math.max(0, name.lastIndexOf("/")));
+        const status = directory && !server.directories.includes(directory) ? 404 : server.listStatus;
         return {
           ok: status === 200,
           status,
           async json() {
-            return isList
-              ? { LoadImageFunCodeNode: { input: { required: { image: [[...server.filenames], {}] } } } }
-              : { mtimes: { ...server.mtimes } };
+            return {
+              directory,
+              files: server.filenames.filter(name => parentOf(name) === directory),
+              directories: server.directories.filter(name => parentOf(name) === directory),
+              mtimes: server.mtimeStatus === 200 ? { ...server.mtimes } : null,
+            };
           },
         };
       },
@@ -158,6 +168,8 @@ async function openGallery(options = {}) {
     server, requests, widget, document, body, gallery, content, dialogs, otherWidget, otherNode, observers,
     refresh: find("button", "Refresh"),
     undo: find("button", "Undo Delete"),
+    up: header.children[3].children[0],
+    breadcrumbs: header.children[3].children[1],
     sort: find("select"),
     filter: controls.find(item => item.placeholder === "Filter"),
     width: controls.find(item => item.type === "number"),
@@ -167,7 +179,14 @@ async function openGallery(options = {}) {
     status: overlay.children[1],
     close: header.children[2],
     names: () => content.children.map(item => item.children[1].textContent),
+    paths: () => content.children.map(item => item.dataset.filename),
     card: filename => content.children.find(item => item.dataset.filename === filename),
+    async openDirectory(directory) {
+      const card = content.children.find(item => item.dataset.directory === directory);
+      content.listeners.click({ target: card.children[0] });
+      await settle();
+      await settle();
+    },
     async action(action, filename) {
       const card = content.children.find(item => item.dataset.filename === filename);
       const target = card.children[2].children.find(button => button.dataset.action === action);
@@ -186,9 +205,9 @@ test("opening loads fresh input files and sorts newest modification first", asyn
   assert.deepEqual(ui.names(), ["z.png", "a.png"]);
   assert.deepEqual(Array.from(ui.widget.options.values), ["a.png", "z.png"]);
   assert.equal(ui.widget.value, "a.png");
-  assert.equal(ui.requests[0].url, "/object_info/LoadImageFunCodeNode");
+  assert.equal(ui.requests[0].url, "/funcode/input_images?directory=");
   assert.equal(ui.requests[0].options.cache, "no-store");
-  assert.deepEqual(JSON.parse(ui.requests[1].options.body).filenames, ["a.png", "z.png"]);
+  assert.equal(ui.requests.length, 1);
   ui.close.onclick();
 });
 
@@ -225,7 +244,7 @@ test("refresh detects added, deleted and overwritten files and renews thumbnail 
   assert.deepEqual(Array.from(ui.widget.options.values), ["a.png", "new.png"]);
   assert.equal(ui.widget.value, "a.png");
   assert.equal(ui.refresh.disabled, false);
-  assert.equal(ui.requests.length, 4);
+  assert.equal(ui.requests.length, 2);
   ui.close.onclick();
 });
 
@@ -372,7 +391,7 @@ test("rename preserves extension and updates live image nodes without closing th
   assert.ok(ui.card("renamed.png"));
   assert.equal(ui.body.children.length, 1);
   assert.equal(ui.undo.hidden, true);
-  assert.equal(ui.requests.length, 3); // No list or mtime reload after local mutation.
+  assert.equal(ui.requests.length, 2); // No directory reload after local mutation.
   ui.close.onclick();
 });
 
@@ -398,7 +417,7 @@ test("cancelled operations and conflicts leave files and selection unchanged", a
   ui.dialogs.confirm = false;
   await ui.action("delete", "a.png");
   await ui.action("rename", "a.png"); // prompt returns null
-  assert.equal(ui.requests.length, 2);
+  assert.equal(ui.requests.length, 1);
   ui.dialogs.prompt = "z";
   ui.server.actionStatus = 409;
   await ui.action("rename", "a.png");
@@ -416,7 +435,7 @@ test("mutations finish syncing live nodes if the gallery is closed during the re
   ui.dialogs.prompt = "after-close";
   const action = ui.action("rename", "a.png");
   ui.close.onclick();
-  assert.equal(ui.requests[2].options.signal, undefined);
+  assert.equal(ui.requests[1].options.signal, undefined);
   release();
   await action;
   assert.equal(ui.widget.value, "after-close.png");
@@ -432,4 +451,94 @@ test("delegated card selection and Esc still close the modal", async () => {
   const next = await openGallery();
   next.document.listeners.keydown({ key: "Escape" });
   assert.equal(next.body.children.length, 0);
+});
+
+test("folder cards are first, have no file actions and open nested paths without selecting an image", async () => {
+  const ui = await openGallery({
+    filenames: ["a.png", "z.png", "album/a.png", "album/子目录/a.png"],
+    directories: ["album", "album/子目录", "empty"],
+    mtimes: { "a.png": 10, "z.png": 20, "album/a.png": 30, "album/子目录/a.png": 40 },
+  });
+  assert.deepEqual(ui.paths(), ["album/", "empty/", "z.png", "a.png"]);
+  assert.equal(ui.card("album/").children[0].tagName, "div");
+  assert.equal(ui.card("album/").children[2].children.length, 0);
+  ui.width.value = "360";
+  ui.apply.onclick();
+  ui.filter.emit("input", "album");
+  await ui.openDirectory("album");
+  assert.equal(ui.filter.value, "");
+  assert.equal(ui.widget.value, "a.png");
+  assert.equal(ui.body.children.length, 1);
+  assert.deepEqual(ui.paths(), ["album/子目录/", "album/a.png"]);
+  assert.ok(ui.widget.options.values.includes("a.png"));
+  assert.ok(ui.widget.options.values.includes("album/a.png"));
+  await ui.openDirectory("album/子目录");
+  assert.deepEqual(ui.paths(), ["album/子目录/a.png"]);
+  assert.equal(ui.card("album/子目录/a.png").children[0].style.width, "360px");
+  const url = new URL(ui.card("album/子目录/a.png").children[0].src, "http://localhost");
+  assert.equal(url.searchParams.get("filename"), "a.png");
+  assert.equal(url.searchParams.get("subfolder"), "album/子目录");
+  assert.equal(ui.gallery.scrollTop, 0);
+  await ui.up.onclick();
+  await settle();
+  assert.ok(ui.card("album/a.png"));
+  await ui.breadcrumbs.children[0].onclick();
+  await settle();
+  assert.ok(ui.card("album/"));
+  assert.equal(ui.up.disabled, true);
+  await ui.openDirectory("empty");
+  assert.deepEqual(ui.paths(), []);
+  assert.match(ui.status.textContent, /No images or folders/);
+  ui.close.onclick();
+});
+
+test("nested rename/delete/undo affect full relative paths and restore into the original directory", async () => {
+  const ui = await openGallery({ filenames: ["a.png", "album/a.png"], directories: ["album"] });
+  await ui.openDirectory("album");
+  ui.widget.value = "album/a.png";
+  ui.dialogs.prompt = "renamed";
+  await ui.action("rename", "album/a.png");
+  assert.equal(ui.widget.value, "album/renamed.png");
+  assert.equal(ui.otherWidget.value, "a.png");
+  assert.ok(ui.card("album/renamed.png"));
+  const request = JSON.parse(ui.requests[2].options.body);
+  assert.equal(request.filename, "album/a.png");
+  assert.equal(request.new_name, "renamed.png");
+  await ui.action("delete", "album/renamed.png");
+  assert.equal(ui.widget.value, "");
+  await ui.up.onclick();
+  await settle();
+  await ui.undo.onclick();
+  await settle();
+  assert.deepEqual(ui.paths(), ["album/", "a.png"]);
+  assert.ok(ui.widget.options.values.includes("album/renamed.png"));
+  await ui.openDirectory("album");
+  assert.ok(ui.card("album/renamed.png"));
+  ui.content.listeners.click({ target: ui.card("album/renamed.png").children[0] });
+  assert.equal(ui.widget.value, "album/renamed.png");
+  assert.equal(ui.body.children.length, 0);
+});
+
+test("failed directory navigation keeps the previous directory and its cards", async () => {
+  const ui = await openGallery({ directories: ["gone"] });
+  ui.server.directories = [];
+  await ui.openDirectory("gone");
+  assert.deepEqual(ui.paths(), ["gone/", "z.png", "a.png"]);
+  assert.equal(ui.up.disabled, true);
+  assert.equal(ui.breadcrumbs.children.length, 1);
+  assert.match(ui.status.textContent, /Could not refresh/);
+  ui.close.onclick();
+});
+
+test("10,000 directories share virtual rendering without creating thumbnail images", async () => {
+  const directories = Array.from({ length: 10000 }, (_, index) => `folder-${String(index).padStart(5, "0")}`);
+  const ui = await openGallery({ filenames: [], directories });
+  assert.ok(ui.content.children.length <= 18);
+  assert.ok(ui.content.children.every(card => card.children[0].tagName === "div"));
+  ui.gallery.scrollTop = 1e9;
+  ui.gallery.listeners.scroll();
+  await settle();
+  assert.ok(ui.paths().includes("folder-09999/"));
+  assert.ok(ui.content.children.length <= 21);
+  ui.close.onclick();
 });
